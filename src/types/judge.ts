@@ -20,6 +20,7 @@ export interface JudgeResult {
   score: number
   label: "correct" | "incorrect"
   explanation: string
+  details?: Record<string, unknown>
 }
 
 export interface Judge {

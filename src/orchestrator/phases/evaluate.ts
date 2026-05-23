@@ -2,11 +2,76 @@ import type { Judge } from "../../types/judge"
 import type { Benchmark } from "../../types/benchmark"
 import type { RunCheckpoint } from "../../types/checkpoint"
 import type { Provider } from "../../types/provider"
+import { generateText } from "ai"
 import { CheckpointManager } from "../checkpoint"
 import { logger } from "../../utils/logger"
 import { ConcurrentExecutor } from "../concurrent"
 import { resolveConcurrency } from "../../types/concurrency"
 import { calculateRetrievalMetrics } from "./retrieval-eval"
+import { buildBeamRubricJudgePrompt, parseBeamRubricJudgeResponse } from "../../prompts/beam"
+
+interface BeamRubricItemResult {
+  rubricItem: string
+  score: number
+  reason: string
+}
+
+function getBeamRubric(question: { metadata?: Record<string, unknown> }): string[] | null {
+  const rubric = question.metadata?.rubric
+  if (!Array.isArray(rubric) || rubric.some((item) => typeof item !== "string")) {
+    return null
+  }
+
+  return rubric
+}
+
+async function evaluateBeamRubricQuestion(
+  judge: Judge,
+  question: { question: string; metadata?: Record<string, unknown> },
+  hypothesis: string
+): Promise<{ score: number; label: "correct" | "incorrect"; explanation: string; details: Record<string, unknown> }> {
+  const rubric = getBeamRubric(question)
+  if (!rubric) {
+    return {
+      score: 0,
+      label: "incorrect",
+      explanation: "Missing BEAM rubric metadata",
+      details: {},
+    }
+  }
+
+  const model = judge.getModel()
+  const results: BeamRubricItemResult[] = []
+
+  for (const rubricItem of rubric) {
+    const prompt = buildBeamRubricJudgePrompt(question.question, rubricItem, hypothesis)
+    const { text } = await generateText({
+      model,
+      prompt,
+      maxOutputTokens: 512,
+      temperature: 0,
+    })
+    const parsed = parseBeamRubricJudgeResponse(text)
+    results.push({
+      rubricItem,
+      score: parsed.score,
+      reason: parsed.reason,
+    })
+  }
+
+  const averageScore =
+    results.length > 0 ? results.reduce((sum, item) => sum + item.score, 0) / results.length : 0
+
+  return {
+    score: averageScore,
+    label: averageScore >= 1 ? "correct" : "incorrect",
+    explanation: `BEAM rubric average score: ${averageScore.toFixed(2)}`,
+    details: {
+      rubricResults: results,
+      rubricAverageScore: averageScore,
+    },
+  }
+}
 
 export async function runEvaluatePhase(
   judge: Judge,
@@ -55,15 +120,18 @@ export async function runEvaluatePhase(
 
       try {
         const searchResults = checkpoint.questions[question.questionId].phases.search.results || []
+        const rubric = getBeamRubric(question)
 
         const [result, retrievalMetrics] = await Promise.all([
-          judge.evaluate({
-            question: question.question,
-            questionType: question.questionType,
-            groundTruth: question.groundTruth,
-            hypothesis,
-            providerPrompts: provider?.prompts,
-          }),
+          rubric
+            ? evaluateBeamRubricQuestion(judge, question, hypothesis)
+            : judge.evaluate({
+                question: question.question,
+                questionType: question.questionType,
+                groundTruth: question.groundTruth,
+                hypothesis,
+                providerPrompts: provider?.prompts,
+              }),
           calculateRetrievalMetrics(
             judge.getModel(),
             question.question,
@@ -78,6 +146,7 @@ export async function runEvaluatePhase(
           score: result.score,
           label: result.label,
           explanation: result.explanation,
+          details: result.details,
           retrievalMetrics,
           completedAt: new Date().toISOString(),
           durationMs,

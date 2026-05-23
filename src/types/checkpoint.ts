@@ -70,6 +70,7 @@ export interface EvaluatePhaseCheckpoint {
   score?: number
   explanation?: string
   retrievalMetrics?: RetrievalMetrics
+  details?: Record<string, unknown>
   startedAt?: string
   completedAt?: string
   durationMs?: number

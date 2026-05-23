@@ -32,16 +32,34 @@ export async function runIngestPhase(
 
   const concurrency = resolveConcurrency("ingest", checkpoint.concurrency, provider.concurrency)
 
-  logger.info(`Ingesting ${pendingQuestions.length} questions (concurrency: ${concurrency})...`)
+  const questionsByGroup = new Map<string, typeof pendingQuestions>()
+  for (const question of pendingQuestions) {
+    const groupId = benchmark.getIngestionGroupId?.(question.questionId) || question.questionId
+    const questions = questionsByGroup.get(groupId) || []
+    questions.push(question)
+    questionsByGroup.set(groupId, questions)
+  }
+
+  const ingestionGroups = Array.from(questionsByGroup.entries()).map(([groupId, questions]) => ({
+    groupId,
+    questions,
+    representative: questions[0],
+  }))
+
+  logger.info(
+    `Ingesting ${pendingQuestions.length} questions across ${ingestionGroups.length} containers (concurrency: ${concurrency})...`
+  )
 
   await ConcurrentExecutor.executeBatched({
-    items: pendingQuestions,
+    items: ingestionGroups,
     concurrency,
     rateLimitMs: RATE_LIMIT_MS,
     runId: checkpoint.runId,
     phaseName: "ingest",
-    executeTask: async ({ item: question, index, total }) => {
-      const containerTag = `${question.questionId}-${checkpoint.dataSourceRunId}`
+    executeTask: async ({ item: group, index, total }) => {
+      const question = group.representative
+      const groupQuestionIds = group.questions.map((q) => q.questionId)
+      const containerTag = checkpoint.questions[question.questionId].containerTag
       const sessions = benchmark.getHaystackSessions(question.questionId)
 
       const sessionsMetadata = sessions.map((s) => ({
@@ -49,13 +67,17 @@ export async function runIngestPhase(
         date: s.metadata?.date as string | undefined,
         messageCount: s.messages.length,
       }))
-      checkpointManager.updateSessions(checkpoint, question.questionId, sessionsMetadata)
+      for (const questionId of groupQuestionIds) {
+        checkpointManager.updateSessions(checkpoint, questionId, sessionsMetadata)
+      }
 
       const startTime = Date.now()
-      checkpointManager.updatePhase(checkpoint, question.questionId, "ingest", {
-        status: "in_progress",
-        startedAt: new Date().toISOString(),
-      })
+      for (const questionId of groupQuestionIds) {
+        checkpointManager.updatePhase(checkpoint, questionId, "ingest", {
+          status: "in_progress",
+          startedAt: new Date().toISOString(),
+        })
+      }
 
       try {
         const completedSessions =
@@ -75,9 +97,11 @@ export async function runIngestPhase(
           }
 
           completedSessions.push(session.sessionId)
-          checkpointManager.updatePhase(checkpoint, question.questionId, "ingest", {
-            completedSessions,
-          })
+          for (const questionId of groupQuestionIds) {
+            checkpointManager.updatePhase(checkpoint, questionId, "ingest", {
+              completedSessions: [...completedSessions],
+            })
+          }
         }
 
         if (combinedResult.taskIds && combinedResult.taskIds.length === 0) {
@@ -99,25 +123,32 @@ export async function runIngestPhase(
         }
 
         const durationMs = Date.now() - startTime
-        checkpointManager.updatePhase(checkpoint, question.questionId, "ingest", {
-          status: "completed",
-          ingestResult: combinedResult,
-          completedAt: new Date().toISOString(),
-          durationMs,
-        })
+        for (const questionId of groupQuestionIds) {
+          checkpointManager.updatePhase(checkpoint, questionId, "ingest", {
+            status: "completed",
+            ingestResult: {
+              documentIds: [...combinedResult.documentIds],
+              ...(combinedResult.taskIds ? { taskIds: [...combinedResult.taskIds] } : {}),
+            },
+            completedAt: new Date().toISOString(),
+            durationMs,
+          })
+        }
 
-        logger.progress(index + 1, total, `Ingested ${question.questionId} (${durationMs}ms)`)
+        logger.progress(index + 1, total, `Ingested ${group.groupId} (${durationMs}ms)`)
 
         return { questionId: question.questionId, durationMs }
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e)
-        checkpointManager.updatePhase(checkpoint, question.questionId, "ingest", {
-          status: "failed",
-          error,
-        })
-        logger.error(`Failed to ingest ${question.questionId}: ${error}`)
+        for (const questionId of groupQuestionIds) {
+          checkpointManager.updatePhase(checkpoint, questionId, "ingest", {
+            status: "failed",
+            error,
+          })
+        }
+        logger.error(`Failed to ingest ${group.groupId}: ${error}`)
         throw new Error(
-          `Ingest failed at ${question.questionId}: ${error}. Fix the issue and resume with the same run ID.`
+          `Ingest failed at ${group.groupId}: ${error}. Fix the issue and resume with the same run ID.`
         )
       }
     },

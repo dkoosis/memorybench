@@ -107,43 +107,64 @@ export async function runIndexingPhase(
 
   const concurrency = resolveConcurrency("indexing", checkpoint.concurrency, provider.concurrency)
 
-  const tracker = new IndexingProgressTracker(toIndex)
+  const questionsByContainer = new Map<string, typeof toIndex>()
+  for (const question of toIndex) {
+    const questions = questionsByContainer.get(question.containerTag) || []
+    questions.push(question)
+    questionsByContainer.set(question.containerTag, questions)
+  }
+
+  const indexingGroups = Array.from(questionsByContainer.entries()).map(
+    ([containerTag, questions]) => ({
+      containerTag,
+      questions,
+      representative: questions[0],
+    })
+  )
+
+  const tracker = new IndexingProgressTracker(indexingGroups.map((group) => group.representative))
   const totalEpisodes = tracker.getTotalEpisodes()
 
   logger.info(
-    `Awaiting indexing for ${toIndex.length} questions, ${totalEpisodes} episodes (concurrency: ${concurrency})...`
+    `Awaiting indexing for ${toIndex.length} questions across ${indexingGroups.length} containers, ${totalEpisodes} episodes (concurrency: ${concurrency})...`
   )
 
   tracker.display()
 
   await ConcurrentExecutor.execute(
-    toIndex,
+    indexingGroups,
     concurrency,
     checkpoint.runId,
     "indexing",
-    async ({ item: question }) => {
+    async ({ item: group }) => {
+      const question = group.representative
+      const groupQuestionIds = group.questions.map((q) => q.questionId)
       const ingestResult = question.phases.ingest.ingestResult
       const episodeCount = getEpisodeCount(question)
 
       if (!ingestResult || episodeCount === 0) {
-        checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
-          status: "completed",
-          completedIds: [],
-          failedIds: [],
-          completedAt: new Date().toISOString(),
-          durationMs: 0,
-        })
+        for (const questionId of groupQuestionIds) {
+          checkpointManager.updatePhase(checkpoint, questionId, "indexing", {
+            status: "completed",
+            completedIds: [],
+            failedIds: [],
+            completedAt: new Date().toISOString(),
+            durationMs: 0,
+          })
+        }
         tracker.markQuestionDone(question.questionId)
         return { questionId: question.questionId, durationMs: 0 }
       }
 
       const startTime = Date.now()
-      checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
-        status: "in_progress",
-        completedIds: [],
-        failedIds: [],
-        startedAt: new Date().toISOString(),
-      })
+      for (const questionId of groupQuestionIds) {
+        checkpointManager.updatePhase(checkpoint, questionId, "indexing", {
+          status: "in_progress",
+          completedIds: [],
+          failedIds: [],
+          startedAt: new Date().toISOString(),
+        })
+      }
 
       try {
         let lastProgress: IndexingProgress = {
@@ -152,36 +173,42 @@ export async function runIndexingPhase(
           total: episodeCount,
         }
 
-        await provider.awaitIndexing(ingestResult, question.containerTag, (progress) => {
+        await provider.awaitIndexing(ingestResult, group.containerTag, (progress) => {
           lastProgress = progress
           tracker.update(question.questionId, progress)
 
-          checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
-            status: "in_progress",
-            completedIds: progress.completedIds,
-            failedIds: progress.failedIds,
-          })
+          for (const questionId of groupQuestionIds) {
+            checkpointManager.updatePhase(checkpoint, questionId, "indexing", {
+              status: "in_progress",
+              completedIds: progress.completedIds,
+              failedIds: progress.failedIds,
+            })
+          }
         })
 
         const durationMs = Date.now() - startTime
-        checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
-          status: "completed",
-          completedIds: lastProgress.completedIds,
-          failedIds: lastProgress.failedIds,
-          completedAt: new Date().toISOString(),
-          durationMs,
-        })
+        for (const questionId of groupQuestionIds) {
+          checkpointManager.updatePhase(checkpoint, questionId, "indexing", {
+            status: "completed",
+            completedIds: lastProgress.completedIds,
+            failedIds: lastProgress.failedIds,
+            completedAt: new Date().toISOString(),
+            durationMs,
+          })
+        }
 
         return { questionId: question.questionId, durationMs }
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e)
-        checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
-          status: "failed",
-          error,
-        })
-        logger.error(`\nFailed to index ${question.questionId}: ${error}`)
+        for (const questionId of groupQuestionIds) {
+          checkpointManager.updatePhase(checkpoint, questionId, "indexing", {
+            status: "failed",
+            error,
+          })
+        }
+        logger.error(`\nFailed to index ${group.containerTag}: ${error}`)
         throw new Error(
-          `Indexing failed at ${question.questionId}: ${error}. Fix the issue and resume with the same run ID.`
+          `Indexing failed at ${group.containerTag}: ${error}. Fix the issue and resume with the same run ID.`
         )
       }
     }

@@ -68,7 +68,7 @@ export const BEAM_QUESTION_TYPES: QuestionTypeRegistry = {
 function flattenChatFile(chatFile: BeamChatFile): BeamBatch[] {
   if (Array.isArray(chatFile)) {
     return chatFile.flatMap((entry) => {
-      if ("turns" in entry) return [entry]
+      if (isBeamBatch(entry)) return [entry]
       return flattenChatFile(entry)
     })
   }
@@ -78,7 +78,23 @@ function flattenChatFile(chatFile: BeamChatFile): BeamBatch[] {
     .flatMap((key) => chatFile[key] || [])
 }
 
+function isBeamBatch(value: unknown): value is BeamBatch {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "batch_number" in value &&
+    "turns" in value &&
+    Array.isArray((value as BeamBatch).turns)
+  )
+}
+
 function createGroundTruth(question: unknown): string {
+  if (typeof question === "object" && question !== null) {
+    const record = question as Record<string, unknown>
+    const answer = getQuestionAnswer(record)
+    return answer || JSON.stringify(question)
+  }
+
   return JSON.stringify(question)
 }
 

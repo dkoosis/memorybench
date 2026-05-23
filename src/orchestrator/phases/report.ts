@@ -133,6 +133,7 @@ export function generateReport(benchmark: Benchmark, checkpoint: RunCheckpoint):
       answerDurationMs,
       totalDurationMs,
       retrievalMetrics,
+      details: evalPhase.details,
     })
 
     if (retrievalMetrics) {

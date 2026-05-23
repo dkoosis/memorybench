@@ -66,6 +66,7 @@ export interface EvaluationResult {
   answerDurationMs: number
   totalDurationMs: number
   retrievalMetrics?: RetrievalMetrics
+  details?: Record<string, unknown>
 }
 
 export interface LatencyStats {

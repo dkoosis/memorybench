@@ -237,7 +237,8 @@ export class Orchestrator {
         : allQuestions
 
       for (const q of questionsToInit) {
-        const containerTag = `${q.questionId}-${checkpoint.dataSourceRunId}`
+        const ingestionGroupId = benchmark.getIngestionGroupId?.(q.questionId) || q.questionId
+        const containerTag = `${ingestionGroupId}-${checkpoint.dataSourceRunId}`
         this.checkpointManager.initQuestion(checkpoint, q.questionId, containerTag, {
           question: q.question,
           groundTruth: q.groundTruth,
