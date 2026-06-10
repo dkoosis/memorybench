@@ -83,11 +83,14 @@ export class SupermemoryProvider implements Provider {
       const results = await Promise.allSettled(
         pendingArray.map(async (docId) => {
           const doc = await this.client!.documents.get(docId)
-          if (doc.status === "done" || doc.status === "failed") {
+          const dreamingStatus = (doc as { dreamingStatus?: string }).dreamingStatus
+          const docReady = doc.status === "done" && dreamingStatus !== "dreaming"
+          const docFailed = doc.status === "failed"
+          if (docReady || docFailed) {
             const memory = await this.client!.memories.get(docId)
-            return { docId, docStatus: doc.status, memStatus: memory.status }
+            return { docId, docStatus: docFailed ? "failed" : "done", memStatus: memory.status }
           }
-          return { docId, docStatus: doc.status, memStatus: "pending" }
+          return { docId, docStatus: "pending", memStatus: "pending" }
         })
       )
 
