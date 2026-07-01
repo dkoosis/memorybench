@@ -30,6 +30,8 @@ export function getProviderConfig(provider: string): { apiKey: string; baseUrl?:
       return { apiKey: config.openaiApiKey } // Filesystem uses OpenAI for memory extraction
     case "rag":
       return { apiKey: config.openaiApiKey } // RAG provider uses OpenAI for embeddings
+    case "trixi":
+      return { apiKey: config.openaiApiKey } // Trixi provider uses OpenAI for memory extraction
     default:
       throw new Error(`Unknown provider: ${provider}`)
   }

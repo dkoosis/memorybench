@@ -77,12 +77,17 @@ Available providers for storing and retrieving memories:
                  Extracts memories via LLM, chunks + embeds extracted content, hybrid BM25 + vector search.
                  Requires: OPENAI_API_KEY (for memory extraction via gpt-4o-mini + embeddings)
 
+  trixi          Trixi nug store (knowledge graph)
+                 Extracts memories via LLM, stores as reference nugs, hybrid lexical/semantic search via the trixi CLI.
+                 Requires: OPENAI_API_KEY (for memory extraction via gpt-4o-mini); trixi binary on PATH.
+
 Usage:
   -p supermemory    Use Supermemory as the memory provider
   -p mem0           Use Mem0 as the memory provider
   -p zep            Use Zep as the memory provider
   -p filesystem     Use file-based memory (CLAUDE.md style)
   -p rag            Use hybrid RAG memory (OpenClaw/QMD style)
+  -p trixi          Use the trixi nug store as the memory provider
 `)
 }
 
