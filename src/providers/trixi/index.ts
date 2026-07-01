@@ -1,4 +1,4 @@
-import { mkdir, rm, access } from "node:fs/promises"
+import { mkdir, rm, access, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { createOpenAI } from "@ai-sdk/openai"
 import type {
@@ -32,6 +32,16 @@ function containerPaths(containerTag: string): ContainerPaths {
     kgRoot: join(dir, "kg"),
     configDir: join(dir, "config"),
   }
+}
+
+/** `trixi --version` reports `git describe` output when built via `make install`
+ * (e.g. "bb6bef25" or "v1.2.3-dirty"), else the literal string "dev". Captured
+ * once per provider run and stamped into each new container so a run's results
+ * are attributable to a specific trixi commit. */
+async function getTrixiVersion(): Promise<string> {
+  const proc = Bun.spawn([TRIXI_BIN, "--version"], { stdout: "pipe", stderr: "pipe" })
+  const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+  return exitCode === 0 ? stdout.trim() : "unknown"
 }
 
 async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> {
@@ -73,13 +83,15 @@ export class TrixiProvider implements Provider {
 
   private openai: ReturnType<typeof createOpenAI> | null = null
   private initialized = new Set<string>()
+  private trixiVersion: string | null = null
 
   async initialize(config: ProviderConfig): Promise<void> {
     if (!config.apiKey || config.apiKey === "none") {
       throw new Error("Trixi provider requires OPENAI_API_KEY for memory extraction")
     }
     this.openai = createOpenAI({ apiKey: config.apiKey })
-    logger.info("Initialized Trixi memory provider (nug store with LLM extraction)")
+    this.trixiVersion = await getTrixiVersion()
+    logger.info(`Initialized Trixi memory provider (nug store, trixi ${this.trixiVersion})`)
   }
 
   private async ensureContainer(containerTag: string): Promise<ContainerPaths> {
@@ -94,6 +106,7 @@ export class TrixiProvider implements Provider {
       .catch(() => false)
     if (!alreadyInitialized) {
       await runTrixi(paths, ["init"])
+      await writeFile(join(paths.dir, "trixi-version.txt"), this.trixiVersion ?? "unknown")
     }
     this.initialized.add(containerTag)
     return paths
