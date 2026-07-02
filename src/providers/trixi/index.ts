@@ -1,5 +1,6 @@
 import { mkdir, rm, access, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import { Database } from "bun:sqlite"
 import { createOpenAI } from "@ai-sdk/openai"
 import type {
   Provider,
@@ -160,23 +161,8 @@ Respond with ONLY a JSON array, one object per NEW memory in order:
 /** Cap on the existing-memories list handed to the decision LLM. */
 const MAX_EXISTING = 20
 
-/** Subprocess concurrency for per-atom searches / candidate fetches. Unbounded
- * Promise.all raced schema DDL on a fresh container DB (SQLITE_BUSY). */
-const TRIXI_CONCURRENCY = 4
-
-/** mapLimit runs fn over items with at most `limit` in flight. */
-async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length)
-  let next = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const i = next++
-      results[i] = await fn(items[i])
-    }
-  })
-  await Promise.all(workers)
-  return results
-}
+/** FTS candidates per new atom. */
+const PER_ATOM_LIMIT = 5
 
 interface ExistingMemory {
   id: string
@@ -184,63 +170,73 @@ interface ExistingMemory {
   body: string
 }
 
-/** searchExistingAtoms surfaces existing ATOMS in the container relevant to
- * this session's atoms: one short hybrid search per atom, unioned, bodies
- * fetched for the decision prompt.
+/** ftsQuery turns atom text into a quoted-token OR query safe for FTS5 MATCH. */
+function ftsQuery(text: string): string {
+  const tokens = text
+    .replace(/[^A-Za-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 1 && !["AND", "OR", "NOT", "NEAR"].includes(t.toUpperCase()))
+  return tokens
+    .slice(0, 24)
+    .map((t) => `"${t}"`)
+    .join(" OR ")
+}
+
+/** searchExistingAtoms surfaces existing ATOMS relevant to this session's
+ * atoms: one raw BM25 FTS query per atom directly against the container's
+ * SQLite (bun:sqlite, readonly), unioned.
  *
- * Per-atom (not one joined query) because a knowledge update often shares few
- * tokens with the fact it replaces ("moved to Chicago" vs "lives in Boston") —
- * a joined multi-topic query dies on trixi's FTS overlap post-filter
- * (ceil(n/2) tokens required) and averages into a mushy single embedding.
- * Short per-atom queries let hybrid search (FTS + semantic fallback) surface
- * the specific stale fact. Semantic works mid-ingest because ingest()
- * syncs+embeds after every session (see below).
+ * Raw FTS, not `trixi search`, after two measured failures in this container
+ * shape (e4smoke5b/c: zero supersede decisions):
+ * - trixi's hybrid RRF fusion drowns exact-token matches — every atom shares
+ *   the "Key Facts (date): Speaker A..." boilerplate and identical tags in
+ *   its embed text, so the semantic channel returns ~150 near-uniform
+ *   candidates that outvote a 4-doc FTS channel. The stale volleyball-record
+ *   atom was FTS match #1 yet absent from hybrid top-10 for its own update.
+ * - trixi's overlap post-filter (ceil(n/2) query tokens required) rejects
+ *   full-sentence atom queries outright.
+ * Weighted bm25 (name=10, body=1, tags=5 — trixi's own weights) ranks the
+ * stale fact first. This is ingest-internal candidate generation (storage
+ * policy); answer-time retrieval still goes through `trixi search`, so the
+ * leaderboard measures the product surface (S1 untouched).
  *
- * Scoped to the `atom` tag: session-summary nugs contain every topic, so they
- * dominate any similarity query, and their names ("<sessionId>") give the
- * decision LLM nothing to compare. Bodies are fetched because atom names
- * truncate at 80 chars — often exactly the changed value falls off the end. */
-async function searchExistingAtoms(
+ * Scoped to the `atom` tag: session-summary nugs contain every topic and
+ * their names carry no comparable fact. */
+function searchExistingAtoms(
   paths: ContainerPaths,
   tag: string,
   atoms: AtomicMemory[]
-): Promise<ExistingMemory[]> {
-  const perAtom = await mapLimit(atoms, TRIXI_CONCURRENCY, async (atom) => {
-    const query = atom.text.slice(0, 300)
-    if (!query.trim()) return []
-    try {
-      const stdout = await runTrixi(paths, [
-        "search",
-        query,
-        `--tag=${tag}`,
-        "--tag=atom",
-        "--json",
-        "--limit=3",
-      ])
-      return stdout ? (JSON.parse(stdout) as Array<{ id: string; name: string }>) : []
-    } catch (error) {
-      logger.warn(`Existing-atom search failed, treating as empty: ${error}`)
-      return []
-    }
-  })
-  const seen = new Map<string, { id: string; name: string }>()
-  for (const hit of perAtom.flat()) {
-    if (!seen.has(hit.id)) seen.set(hit.id, hit)
-    if (seen.size >= MAX_EXISTING) break
-  }
-  const candidates = [...seen.values()]
-  return (
-    await mapLimit(candidates, TRIXI_CONCURRENCY, async (c): Promise<ExistingMemory | null> => {
-      try {
-        const raw = await runTrixi(paths, ["get", c.id, "--json"])
-        const nug = JSON.parse(raw) as { body?: string }
-        return { ...c, body: (nug.body ?? c.name).slice(0, 300) }
-      } catch (error) {
-        logger.warn(`Candidate body fetch failed for ${c.id}: ${error}`)
-        return { ...c, body: c.name }
+): ExistingMemory[] {
+  let db: Database | null = null
+  try {
+    // readwrite (not readonly): the store is WAL-mode, and a readonly handle
+    // can't create the -shm/-wal sidecars ("unable to open database file").
+    // create:false keeps a first-session missing DB an empty result, not an
+    // empty file trixi would then fight over. Only SELECTs run here, and
+    // ingest is sequential per container, so no write contention.
+    db = new Database(paths.db, { readwrite: true, create: false })
+    const stmt = db.prepare<ExistingMemory, [string, string, string]>(
+      `SELECT n.id AS id, n.name AS name, n.body AS body
+       FROM nugs_fts JOIN nugs n ON n.rowid = nugs_fts.rowid
+       WHERE nugs_fts MATCH ?1 AND n.tags LIKE ?2 AND n.tags LIKE ?3
+       ORDER BY bm25(nugs_fts, 10, 1, 5) LIMIT ${PER_ATOM_LIMIT}`
+    )
+    const seen = new Map<string, ExistingMemory>()
+    for (const atom of atoms) {
+      const q = ftsQuery(atom.text)
+      if (!q) continue
+      for (const row of stmt.all(q, `%"${tag}"%`, `%"atom"%`)) {
+        if (!seen.has(row.id)) seen.set(row.id, { ...row, body: row.body.slice(0, 300) })
       }
-    })
-  ).filter((c): c is ExistingMemory => c !== null)
+      if (seen.size >= MAX_EXISTING) break
+    }
+    return [...seen.values()].slice(0, MAX_EXISTING)
+  } catch (error) {
+    logger.warn(`Existing-atom FTS search failed, treating as empty: ${error}`)
+    return []
+  } finally {
+    db?.close()
+  }
 }
 
 async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> {
@@ -336,8 +332,13 @@ export class TrixiProvider implements Provider {
       // classic ADD/UPDATE step); contradicted memories are SUPERSEDED via
       // `trixi supersede` — invalidate-don't-delete, search decay demotes
       // them below their replacements.
-      const existing = await searchExistingAtoms(paths, tag, atoms)
+      const existing = searchExistingAtoms(paths, tag, atoms)
       const decisions = await decideMemoryUpdates(openai, existing, atoms)
+      const counts = { ADD: 0, SUPERSEDE: 0, NOOP: 0 }
+      for (const d of decisions) counts[d.action]++
+      logger.info(
+        `Update decisions for ${session.sessionId}: ${counts.ADD} add, ${counts.SUPERSEDE} supersede, ${counts.NOOP} noop (${existing.length} candidates)`
+      )
 
       for (let i = 0; i < atoms.length; i++) {
         const atom = atoms[i]
@@ -377,20 +378,6 @@ export class TrixiProvider implements Provider {
         `Created trixi session nug ${id} + ${atoms.length} atoms for session ${session.sessionId}`
       )
       documentIds.push(id)
-    }
-
-    // Make this batch's atoms visible to the NEXT session's update-decision
-    // search — sync for FTS, embed for the semantic channel (paraphrase
-    // updates share almost no tokens with the fact they replace, so FTS alone
-    // misses them). embed is incremental (hash-skip on already-embedded nugs),
-    // so per-session calls don't re-embed the container; awaitIndexing's final
-    // pass becomes a cheap no-op. Best-effort: on failure the decision search
-    // degrades to FTS-only rather than failing ingest.
-    try {
-      await runTrixi(paths, ["sync"])
-      await runTrixi(paths, ["embed"])
-    } catch (error) {
-      logger.warn(`Per-session sync/embed failed (decision search degrades to FTS): ${error}`)
     }
 
     return { documentIds }
