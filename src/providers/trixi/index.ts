@@ -11,6 +11,7 @@ import type {
 } from "../../types/provider"
 import type { UnifiedSession } from "../../types/unified"
 import { logger } from "../../utils/logger"
+import { generateText } from "ai"
 import { extractMemories } from "../../prompts/extraction"
 import { TRIXI_PROMPTS } from "./prompts"
 
@@ -75,6 +76,108 @@ function splitAtomicMemories(extracted: string, session: UnifiedSession): Atomic
     atoms.push({ name, body: context ? `${context}: ${text}` : text })
   }
   return atoms
+}
+
+interface UpdateDecision {
+  action: "ADD" | "SUPERSEDE" | "NOOP"
+  supersedes?: string // real nug id of the memory this atom replaces
+}
+
+const DECISION_MODEL = "gpt-4o-mini"
+
+/** decideMemoryUpdates asks the LLM, per new atom, whether it is new
+ * information (ADD), replaces an existing memory (SUPERSEDE), or is already
+ * known (NOOP) — mem0's classic update step (its DEFAULT_UPDATE_MEMORY_PROMPT
+ * shape) with trixi's supersede-not-delete twist. Existing memories are
+ * presented under integer ids (anti-hallucination: the model can only pick
+ * from the enumerated list); the mapping back to real ids happens here.
+ * Any parse failure degrades to ADD-everything — ingest must never fail on a
+ * malformed decision. */
+async function decideMemoryUpdates(
+  openai: NonNullable<TrixiProvider["openai"]>,
+  existing: Array<{ id: string; name: string }>,
+  atoms: AtomicMemory[]
+): Promise<UpdateDecision[]> {
+  const addAll = atoms.map((): UpdateDecision => ({ action: "ADD" }))
+  if (existing.length === 0 || atoms.length === 0) return addAll
+
+  const existingList = existing.map((m, i) => `${i}: ${m.name}`).join("\n")
+  const atomList = atoms.map((a, i) => `${i}: ${a.body}`).join("\n")
+
+  const prompt = `You manage a memory store. Compare each NEW memory against the EXISTING memories and decide, for each new memory:
+- "ADD": genuinely new information, no existing memory covers it
+- "SUPERSEDE": it updates/contradicts/replaces an existing memory (the old one becomes stale) — include that existing memory's integer id as "supersedes"
+- "NOOP": the information is already fully present in an existing memory
+
+EXISTING memories:
+${existingList}
+
+NEW memories:
+${atomList}
+
+Rules:
+- SUPERSEDE only on a real update or contradiction (changed value, new state of the same fact). Merely related topics are ADD.
+- "supersedes" must be one of the EXISTING integer ids shown above. Never invent ids.
+- When unsure, prefer ADD (losing an update is worse than a duplicate).
+
+Respond with ONLY a JSON array, one object per NEW memory in order:
+[{"action":"ADD"},{"action":"SUPERSEDE","supersedes":3},{"action":"NOOP"}, ...]`
+
+  try {
+    const { text } = await generateText({
+      model: openai(DECISION_MODEL),
+      prompt,
+      maxTokens: 1500,
+      temperature: 0,
+    } as Parameters<typeof generateText>[0])
+    const cleaned = text.replace(/```json|```/g, "").trim()
+    const raw = JSON.parse(cleaned) as Array<{ action?: string; supersedes?: number | string }>
+    if (!Array.isArray(raw)) return addAll
+    return atoms.map((_, i): UpdateDecision => {
+      const d = raw[i]
+      if (!d || d.action === "ADD" || (d.action !== "SUPERSEDE" && d.action !== "NOOP")) {
+        return { action: "ADD" }
+      }
+      if (d.action === "NOOP") return { action: "NOOP" }
+      const idx = Number(d.supersedes)
+      if (!Number.isInteger(idx) || idx < 0 || idx >= existing.length) {
+        return { action: "ADD" } // invalid pointer → safest is ADD
+      }
+      return { action: "SUPERSEDE", supersedes: existing[idx].id }
+    })
+  } catch (error) {
+    logger.warn(`Update decision failed, defaulting to ADD-all: ${error}`)
+    return addAll
+  }
+}
+
+/** searchExistingAtoms surfaces up to 10 existing memories in the container
+ * relevant to this session's atoms. Runs before embed/sync, so retrieval is
+ * FTS-driven — fine for the decision step (topic-word overlap is the signal).
+ * Query is capped to respect trixi's FTS input limits. */
+async function searchExistingAtoms(
+  paths: ContainerPaths,
+  tag: string,
+  atoms: AtomicMemory[]
+): Promise<Array<{ id: string; name: string }>> {
+  const query = atoms
+    .map((a) => a.body)
+    .join(" ")
+    .slice(0, 1500)
+  if (!query.trim()) return []
+  try {
+    const stdout = await runTrixi(paths, [
+      "search",
+      query,
+      `--tag=${tag}`,
+      "--json",
+      "--limit=10",
+    ])
+    return stdout ? (JSON.parse(stdout) as Array<{ id: string; name: string }>) : []
+  } catch (error) {
+    logger.warn(`Existing-atom search failed, treating as empty: ${error}`)
+    return []
+  }
 }
 
 async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> {
@@ -162,8 +265,21 @@ export class TrixiProvider implements Provider {
       // summary blob per session buries exact dates/counts under one averaged
       // embedding. The full summary is kept too as an aggregation target.
       const atoms = splitAtomicMemories(extractedMemories, session)
+
+      // E4 (tx-2fvm6): update semantics at ingest. Later sessions can update
+      // facts from earlier ones ("moved to Chicago" after "lives in Boston");
+      // without a decision step both atoms coexist and compete at retrieval.
+      // One existing-memories search + one LLM decision per session (mem0's
+      // classic ADD/UPDATE step); contradicted memories are SUPERSEDED via
+      // `trixi supersede` — invalidate-don't-delete, search decay demotes
+      // them below their replacements.
+      const existing = await searchExistingAtoms(paths, tag, atoms)
+      const decisions = await decideMemoryUpdates(openai, existing, atoms)
+
       for (let i = 0; i < atoms.length; i++) {
         const atom = atoms[i]
+        const decision = decisions[i] ?? { action: "ADD" }
+        if (decision.action === "NOOP") continue
         // --flag=value form: extracted bullets can begin with "-"/"--"
         // (e.g. "--seed accepts whole numbers..."), which kong would parse as
         // a flag in the two-token form.
@@ -175,6 +291,13 @@ export class TrixiProvider implements Provider {
           `--tags=${tag}`,
         ])
         documentIds.push(id)
+        if (decision.action === "SUPERSEDE" && decision.supersedes) {
+          try {
+            await runTrixi(paths, ["supersede", decision.supersedes, `--by=${id}`])
+          } catch (error) {
+            logger.warn(`Supersede ${decision.supersedes} by ${id} failed: ${error}`)
+          }
+        }
       }
 
       const id = await runTrixi(paths, [
