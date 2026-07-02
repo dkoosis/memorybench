@@ -99,13 +99,15 @@ const DECISION_MODEL = "gpt-4o-mini"
  * malformed decision. */
 async function decideMemoryUpdates(
   openai: NonNullable<TrixiProvider["openai"]>,
-  existing: Array<{ id: string; name: string }>,
+  existing: ExistingMemory[],
   atoms: AtomicMemory[]
 ): Promise<UpdateDecision[]> {
   const addAll = atoms.map((): UpdateDecision => ({ action: "ADD" }))
   if (existing.length === 0 || atoms.length === 0) return addAll
 
-  const existingList = existing.map((m, i) => `${i}: ${m.name}`).join("\n")
+  // Bodies, not names: atom names truncate at 80 chars, which routinely cuts
+  // the changed value the model must compare ("...league with a record of").
+  const existingList = existing.map((m, i) => `${i}: ${m.body}`).join("\n")
   const atomList = atoms.map((a, i) => `${i}: ${a.body}`).join("\n")
 
   const prompt = `You manage a memory store. Compare each NEW memory against the EXISTING memories and decide, for each new memory:
@@ -158,8 +160,33 @@ Respond with ONLY a JSON array, one object per NEW memory in order:
 /** Cap on the existing-memories list handed to the decision LLM. */
 const MAX_EXISTING = 20
 
-/** searchExistingAtoms surfaces existing memories in the container relevant
- * to this session's atoms: one short hybrid search per atom, unioned.
+/** Subprocess concurrency for per-atom searches / candidate fetches. Unbounded
+ * Promise.all raced schema DDL on a fresh container DB (SQLITE_BUSY). */
+const TRIXI_CONCURRENCY = 4
+
+/** mapLimit runs fn over items with at most `limit` in flight. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await fn(items[i])
+    }
+  })
+  await Promise.all(workers)
+  return results
+}
+
+interface ExistingMemory {
+  id: string
+  name: string
+  body: string
+}
+
+/** searchExistingAtoms surfaces existing ATOMS in the container relevant to
+ * this session's atoms: one short hybrid search per atom, unioned, bodies
+ * fetched for the decision prompt.
  *
  * Per-atom (not one joined query) because a knowledge update often shares few
  * tokens with the fact it replaces ("moved to Chicago" vs "lives in Boston") —
@@ -167,37 +194,53 @@ const MAX_EXISTING = 20
  * (ceil(n/2) tokens required) and averages into a mushy single embedding.
  * Short per-atom queries let hybrid search (FTS + semantic fallback) surface
  * the specific stale fact. Semantic works mid-ingest because ingest()
- * syncs+embeds after every session (see below). */
+ * syncs+embeds after every session (see below).
+ *
+ * Scoped to the `atom` tag: session-summary nugs contain every topic, so they
+ * dominate any similarity query, and their names ("<sessionId>") give the
+ * decision LLM nothing to compare. Bodies are fetched because atom names
+ * truncate at 80 chars — often exactly the changed value falls off the end. */
 async function searchExistingAtoms(
   paths: ContainerPaths,
   tag: string,
   atoms: AtomicMemory[]
-): Promise<Array<{ id: string; name: string }>> {
-  const perAtom = await Promise.all(
-    atoms.map(async (atom) => {
-      const query = atom.text.slice(0, 300)
-      if (!query.trim()) return []
-      try {
-        const stdout = await runTrixi(paths, [
-          "search",
-          query,
-          `--tag=${tag}`,
-          "--json",
-          "--limit=3",
-        ])
-        return stdout ? (JSON.parse(stdout) as Array<{ id: string; name: string }>) : []
-      } catch (error) {
-        logger.warn(`Existing-atom search failed, treating as empty: ${error}`)
-        return []
-      }
-    })
-  )
+): Promise<ExistingMemory[]> {
+  const perAtom = await mapLimit(atoms, TRIXI_CONCURRENCY, async (atom) => {
+    const query = atom.text.slice(0, 300)
+    if (!query.trim()) return []
+    try {
+      const stdout = await runTrixi(paths, [
+        "search",
+        query,
+        `--tag=${tag}`,
+        "--tag=atom",
+        "--json",
+        "--limit=3",
+      ])
+      return stdout ? (JSON.parse(stdout) as Array<{ id: string; name: string }>) : []
+    } catch (error) {
+      logger.warn(`Existing-atom search failed, treating as empty: ${error}`)
+      return []
+    }
+  })
   const seen = new Map<string, { id: string; name: string }>()
   for (const hit of perAtom.flat()) {
     if (!seen.has(hit.id)) seen.set(hit.id, hit)
     if (seen.size >= MAX_EXISTING) break
   }
-  return [...seen.values()]
+  const candidates = [...seen.values()]
+  return (
+    await mapLimit(candidates, TRIXI_CONCURRENCY, async (c): Promise<ExistingMemory | null> => {
+      try {
+        const raw = await runTrixi(paths, ["get", c.id, "--json"])
+        const nug = JSON.parse(raw) as { body?: string }
+        return { ...c, body: (nug.body ?? c.name).slice(0, 300) }
+      } catch (error) {
+        logger.warn(`Candidate body fetch failed for ${c.id}: ${error}`)
+        return { ...c, body: c.name }
+      }
+    })
+  ).filter((c): c is ExistingMemory => c !== null)
 }
 
 async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> {
@@ -303,12 +346,15 @@ export class TrixiProvider implements Provider {
         // --flag=value form: extracted bullets can begin with "-"/"--"
         // (e.g. "--seed accepts whole numbers..."), which kong would parse as
         // a flag in the two-token form.
+        // `atom` tag distinguishes atomic facts from session summaries so the
+        // update-decision search can scope to atoms (summaries contain every
+        // topic and would dominate any similarity query).
         const id = await runTrixi(paths, [
           "create",
           "reference",
           `--name=${atom.name}`,
           `--body=${atom.body}`,
-          `--tags=${tag}`,
+          `--tags=${tag},atom`,
         ])
         documentIds.push(id)
         if (decision.action === "SUPERSEDE" && decision.supersedes) {
