@@ -409,9 +409,11 @@ export class TrixiProvider implements Provider {
 
   async search(query: string, options: SearchOptions): Promise<unknown[]> {
     const paths = containerPaths(options.containerTag)
-    // 30 matches supermemory's own adapter on this bench (tx-grod0 parity);
-    // 10 under-fed the answer model relative to competitors.
-    const limit = options.limit || 30
+    // tx-grod0 decomposition: trixi107-parity (limit 30 + temporal prompt)
+    // scored 0.54 overall with temporal 0.379 — the 30-candidate flood at
+    // ~30% precision buries the answer model. Back to 10; trixi108 isolates
+    // the prompt's effect alone.
+    const limit = options.limit || 10
 
     const stdout = await runTrixi(paths, [
       "search",
