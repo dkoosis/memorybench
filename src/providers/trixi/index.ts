@@ -332,7 +332,13 @@ export class TrixiProvider implements Provider {
       // classic ADD/UPDATE step); contradicted memories are SUPERSEDED via
       // `trixi supersede` — invalidate-don't-delete, search decay demotes
       // them below their replacements.
-      const existing = searchExistingAtoms(paths, tag, atoms)
+      //
+      // VERDICT (trixi105-e4, 100q): REVERT — off by default. knowledge-update
+      // 0.647→0.706 as designed, but the 0.1 demotion buries the timeline
+      // temporal questions need (temporal 0.52→0.448, overall 0.57→0.55).
+      // Re-enable with TRIXI_UPDATE_DECISIONS=1 for E4b iterations.
+      const e4Enabled = process.env.TRIXI_UPDATE_DECISIONS === "1"
+      const existing = e4Enabled ? searchExistingAtoms(paths, tag, atoms) : []
       const decisions = await decideMemoryUpdates(openai, existing, atoms)
       const counts = { ADD: 0, SUPERSEDE: 0, NOOP: 0 }
       for (const d of decisions) counts[d.action]++
