@@ -48,6 +48,10 @@ async function getTrixiVersion(): Promise<string> {
 interface AtomicMemory {
   name: string
   body: string
+  /** raw bullet text without the section/date prefix — the search query for
+   * the update-decision step (prefix tokens like the session date would match
+   * every atom from the same session, drowning the real signal) */
+  text: string
 }
 
 /** Split MEMORY.md-style extraction output ("## Section" headers + "- " bullets)
@@ -73,7 +77,7 @@ function splitAtomicMemories(extracted: string, session: UnifiedSession): Atomic
     let name = text.length > 80 ? text.slice(0, 80).replace(/\s+\S*$/, "") : text
     name = `${name} (${safeId}#${atoms.length})`
     const context = [section, date && `(${date})`].filter(Boolean).join(" ")
-    atoms.push({ name, body: context ? `${context}: ${text}` : text })
+    atoms.push({ name, body: context ? `${context}: ${text}` : text, text })
   }
   return atoms
 }
@@ -151,33 +155,49 @@ Respond with ONLY a JSON array, one object per NEW memory in order:
   }
 }
 
-/** searchExistingAtoms surfaces up to 10 existing memories in the container
- * relevant to this session's atoms. Runs before embed/sync, so retrieval is
- * FTS-driven — fine for the decision step (topic-word overlap is the signal).
- * Query is capped to respect trixi's FTS input limits. */
+/** Cap on the existing-memories list handed to the decision LLM. */
+const MAX_EXISTING = 20
+
+/** searchExistingAtoms surfaces existing memories in the container relevant
+ * to this session's atoms: one short hybrid search per atom, unioned.
+ *
+ * Per-atom (not one joined query) because a knowledge update often shares few
+ * tokens with the fact it replaces ("moved to Chicago" vs "lives in Boston") —
+ * a joined multi-topic query dies on trixi's FTS overlap post-filter
+ * (ceil(n/2) tokens required) and averages into a mushy single embedding.
+ * Short per-atom queries let hybrid search (FTS + semantic fallback) surface
+ * the specific stale fact. Semantic works mid-ingest because ingest()
+ * syncs+embeds after every session (see below). */
 async function searchExistingAtoms(
   paths: ContainerPaths,
   tag: string,
   atoms: AtomicMemory[]
 ): Promise<Array<{ id: string; name: string }>> {
-  const query = atoms
-    .map((a) => a.body)
-    .join(" ")
-    .slice(0, 1500)
-  if (!query.trim()) return []
-  try {
-    const stdout = await runTrixi(paths, [
-      "search",
-      query,
-      `--tag=${tag}`,
-      "--json",
-      "--limit=10",
-    ])
-    return stdout ? (JSON.parse(stdout) as Array<{ id: string; name: string }>) : []
-  } catch (error) {
-    logger.warn(`Existing-atom search failed, treating as empty: ${error}`)
-    return []
+  const perAtom = await Promise.all(
+    atoms.map(async (atom) => {
+      const query = atom.text.slice(0, 300)
+      if (!query.trim()) return []
+      try {
+        const stdout = await runTrixi(paths, [
+          "search",
+          query,
+          `--tag=${tag}`,
+          "--json",
+          "--limit=3",
+        ])
+        return stdout ? (JSON.parse(stdout) as Array<{ id: string; name: string }>) : []
+      } catch (error) {
+        logger.warn(`Existing-atom search failed, treating as empty: ${error}`)
+        return []
+      }
+    })
+  )
+  const seen = new Map<string, { id: string; name: string }>()
+  for (const hit of perAtom.flat()) {
+    if (!seen.has(hit.id)) seen.set(hit.id, hit)
+    if (seen.size >= MAX_EXISTING) break
   }
+  return [...seen.values()]
 }
 
 async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> {
@@ -269,7 +289,7 @@ export class TrixiProvider implements Provider {
       // E4 (tx-2fvm6): update semantics at ingest. Later sessions can update
       // facts from earlier ones ("moved to Chicago" after "lives in Boston");
       // without a decision step both atoms coexist and compete at retrieval.
-      // One existing-memories search + one LLM decision per session (mem0's
+      // Per-atom candidate searches + one LLM decision per session (mem0's
       // classic ADD/UPDATE step); contradicted memories are SUPERSEDED via
       // `trixi supersede` — invalidate-don't-delete, search decay demotes
       // them below their replacements.
@@ -311,6 +331,20 @@ export class TrixiProvider implements Provider {
         `Created trixi session nug ${id} + ${atoms.length} atoms for session ${session.sessionId}`
       )
       documentIds.push(id)
+    }
+
+    // Make this batch's atoms visible to the NEXT session's update-decision
+    // search — sync for FTS, embed for the semantic channel (paraphrase
+    // updates share almost no tokens with the fact they replace, so FTS alone
+    // misses them). embed is incremental (hash-skip on already-embedded nugs),
+    // so per-session calls don't re-embed the container; awaitIndexing's final
+    // pass becomes a cheap no-op. Best-effort: on failure the decision search
+    // degrades to FTS-only rather than failing ingest.
+    try {
+      await runTrixi(paths, ["sync"])
+      await runTrixi(paths, ["embed"])
+    } catch (error) {
+      logger.warn(`Per-session sync/embed failed (decision search degrades to FTS): ${error}`)
     }
 
     return { documentIds }
