@@ -37,7 +37,17 @@ function fmtNaive(d: Date): string {
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
 }
 
-function buildTrixiContext(context: unknown[]): string {
+// temporalCue reports whether the question reads temporal — the TIMELINE
+// section helps those (+9.6 temporal, D-036) but fragments multi-hop
+// synthesis on non-temporal questions (-7.7 multi-session, replicated at
+// both scales). Gate it instead of paying the trade everywhere (E4c gated).
+function temporalCue(question: string): boolean {
+  return /\b(when|how long|how many (days|weeks|months|years)|before|after|first time|last time|ago|earlier|latest|recent|still|anymore|date|day|month|year|since|until|between)\b/i.test(
+    question
+  )
+}
+
+function buildTrixiContext(context: unknown[], includeTimeline: boolean): string {
   const results = context as TrixiResult[]
 
   if (results.length === 0) {
@@ -67,7 +77,7 @@ function buildTrixiContext(context: unknown[]): string {
     .map((d) => `- ${fmtNaive(d.date!)} — [Nug ${d.i + 1}] ${d.result.name}`)
     .join("\n")
 
-  return timeline.length > 0
+  return includeTimeline && timeline.length > 0
     ? `${nugList}\n\n=== TIMELINE (all dated nugs, chronological) ===\n${timeline}`
     : nugList
 }
@@ -77,7 +87,8 @@ export function buildTrixiAnswerPrompt(
   context: unknown[],
   questionDate?: string
 ): string {
-  const retrievedContext = buildTrixiContext(context)
+  const isTemporal = temporalCue(question)
+  const retrievedContext = buildTrixiContext(context, isTemporal)
 
   return `You are a question-answering system. You have access to nugs (extracted memory facts) retrieved from a knowledge graph. Based on the retrieved nugs below, answer the question.
 
@@ -99,7 +110,7 @@ ${retrievedContext}
 
 **How to answer (structured notes, then synthesize):**
 1. NOTES: for each relevant nug, write one line — [Nug N] date | the fact it contributes. Skip irrelevant nugs.
-2. For temporal questions, use the TIMELINE section: it lists every dated nug in chronological order — read event order and spacing from it, then do date arithmetic explicitly, writing the dates out before subtracting.
+2. ${isTemporal ? "For temporal questions, use the TIMELINE section: it lists every dated nug in chronological order — read event order and spacing from it, then do date arithmetic explicitly, writing the dates out before subtracting." : "Synthesize freely across sessions — trace entities and events through the nugs wherever the question leads."}
 3. SYNTHESIZE: combine your notes across sessions into the answer.
 4. Base your answer ONLY on the provided nugs.
 5. If the nugs do not contain enough information, respond with "I don't know".
