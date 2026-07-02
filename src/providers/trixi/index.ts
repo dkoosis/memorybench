@@ -123,9 +123,12 @@ NEW memories:
 ${atomList}
 
 Rules:
-- SUPERSEDE only on a real update or contradiction (changed value, new state of the same fact). Merely related topics are ADD.
+- SUPERSEDE ONLY on a direct contradiction: the same fact with a changed value, so the existing memory is now wrong as stated (e.g. "their record is 3-2" -> "their record is 5-2"; "the meeting is on Tuesday" -> "the meeting moved to Thursday").
+- Progressions and sequences of events are ADD, never SUPERSEDE — each step stays true as history (e.g. "started watching series X" then "finished season 3 of X"; "adopted a kitten" then "took the kitten to its first vet visit"). Timeline questions depend on keeping every step.
+- A later chapter of an evolving story is ADD; only a correction of a now-false value is SUPERSEDE.
+- Merely related topics are ADD.
 - "supersedes" must be one of the EXISTING integer ids shown above. Never invent ids.
-- When unsure, prefer ADD (losing an update is worse than a duplicate).
+- When unsure, prefer ADD (losing history is worse than a duplicate).
 
 Respond with ONLY a JSON array, one object per NEW memory in order:
 [{"action":"ADD"},{"action":"SUPERSEDE","supersedes":3},{"action":"NOOP"}, ...]`
