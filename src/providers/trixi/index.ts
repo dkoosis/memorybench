@@ -164,15 +164,15 @@ export class TrixiProvider implements Provider {
       const atoms = splitAtomicMemories(extractedMemories, session)
       for (let i = 0; i < atoms.length; i++) {
         const atom = atoms[i]
+        // --flag=value form: extracted bullets can begin with "-"/"--"
+        // (e.g. "--seed accepts whole numbers..."), which kong would parse as
+        // a flag in the two-token form.
         const id = await runTrixi(paths, [
           "create",
           "reference",
-          "--name",
-          atom.name,
-          "--body",
-          atom.body,
-          "--tags",
-          tag,
+          `--name=${atom.name}`,
+          `--body=${atom.body}`,
+          `--tags=${tag}`,
         ])
         documentIds.push(id)
       }
@@ -180,12 +180,9 @@ export class TrixiProvider implements Provider {
       const id = await runTrixi(paths, [
         "create",
         "reference",
-        "--name",
-        safeId,
-        "--body",
-        extractedMemories,
-        "--tags",
-        tag,
+        `--name=${safeId}`,
+        `--body=${extractedMemories}`,
+        `--tags=${tag}`,
       ])
       logger.debug(
         `Created trixi session nug ${id} + ${atoms.length} atoms for session ${session.sessionId}`
