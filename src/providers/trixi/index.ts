@@ -44,6 +44,39 @@ async function getTrixiVersion(): Promise<string> {
   return exitCode === 0 ? stdout.trim() : "unknown"
 }
 
+interface AtomicMemory {
+  name: string
+  body: string
+}
+
+/** Split MEMORY.md-style extraction output ("## Section" headers + "- " bullets)
+ * into self-contained atomic memories. Each bullet is one atom: name = bullet
+ * text truncated at a word boundary (drives trixi's name-weighted BM25) plus a
+ * per-session uniqueness suffix; body = section-prefixed bullet with session
+ * date for temporal grounding. */
+function splitAtomicMemories(extracted: string, session: UnifiedSession): AtomicMemory[] {
+  const date =
+    (session.metadata?.formattedDate as string) || (session.metadata?.date as string) || ""
+  const safeId = sanitizePath(session.sessionId)
+  const atoms: AtomicMemory[] = []
+  let section = ""
+  for (const line of extracted.split("\n")) {
+    const header = line.match(/^##\s+(.*)/)
+    if (header) {
+      section = header[1].trim()
+      continue
+    }
+    const bullet = line.match(/^\s*[-*]\s+(.*)/)
+    if (!bullet || bullet[1].trim().length < 8) continue
+    const text = bullet[1].trim()
+    let name = text.length > 80 ? text.slice(0, 80).replace(/\s+\S*$/, "") : text
+    name = `${name} (${safeId}#${atoms.length})`
+    const context = [section, date && `(${date})`].filter(Boolean).join(" ")
+    atoms.push({ name, body: context ? `${context}: ${text}` : text })
+  }
+  return atoms
+}
+
 async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> {
   const proc = Bun.spawn(
     [TRIXI_BIN, "--db", paths.db, "--kg-root", paths.kgRoot, "--config", paths.configDir, ...args],
@@ -121,6 +154,29 @@ export class TrixiProvider implements Provider {
     for (const session of sessions) {
       const extractedMemories = await extractMemories(openai, session)
       const safeId = sanitizePath(session.sessionId)
+      const tag = sanitizePath(options.containerTag)
+
+      // Storage granularity is trixi's policy (extraction stays shared across
+      // providers for comparability): store each extracted bullet as its own
+      // atomic nug so specific facts are individually retrievable — one
+      // summary blob per session buries exact dates/counts under one averaged
+      // embedding. The full summary is kept too as an aggregation target.
+      const atoms = splitAtomicMemories(extractedMemories, session)
+      for (let i = 0; i < atoms.length; i++) {
+        const atom = atoms[i]
+        const id = await runTrixi(paths, [
+          "create",
+          "reference",
+          "--name",
+          atom.name,
+          "--body",
+          atom.body,
+          "--tags",
+          tag,
+        ])
+        documentIds.push(id)
+      }
+
       const id = await runTrixi(paths, [
         "create",
         "reference",
@@ -129,9 +185,11 @@ export class TrixiProvider implements Provider {
         "--body",
         extractedMemories,
         "--tags",
-        sanitizePath(options.containerTag),
+        tag,
       ])
-      logger.debug(`Created trixi nug ${id} for session ${session.sessionId}`)
+      logger.debug(
+        `Created trixi session nug ${id} + ${atoms.length} atoms for session ${session.sessionId}`
+      )
       documentIds.push(id)
     }
 
