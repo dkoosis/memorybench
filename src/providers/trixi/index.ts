@@ -320,6 +320,12 @@ export class TrixiProvider implements Provider {
       const extractedMemories = await extractMemories(openai, session)
       const safeId = sanitizePath(session.sessionId)
       const tag = sanitizePath(options.containerTag)
+      // tx-1e5a5: stamp each nug with its source session so the engine's
+      // session-diversified top-k axis (SessionTagPrefix, default "sess:") can
+      // group candidates by session at rank time. Additive to the container
+      // tag — search --tag scoping is unaffected. Same sanitized id the atom
+      // Name suffix uses.
+      const sessTag = `sess:${safeId}`
 
       // Storage granularity is trixi's policy (extraction stays shared across
       // providers for comparability): store each extracted bullet as its own
@@ -364,7 +370,7 @@ export class TrixiProvider implements Provider {
           "reference",
           `--name=${atom.name}`,
           `--body=${atom.body}`,
-          `--tags=${tag},atom`,
+          `--tags=${tag},atom,${sessTag}`,
         ])
         documentIds.push(id)
         if (decision.action === "SUPERSEDE" && decision.supersedes) {
@@ -381,7 +387,7 @@ export class TrixiProvider implements Provider {
         "reference",
         `--name=${safeId}`,
         `--body=${extractedMemories}`,
-        `--tags=${tag}`,
+        `--tags=${tag},${sessTag}`,
       ])
       logger.debug(
         `Created trixi session nug ${id} + ${atoms.length} atoms for session ${session.sessionId}`
