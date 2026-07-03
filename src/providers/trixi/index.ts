@@ -321,11 +321,12 @@ export class TrixiProvider implements Provider {
       const safeId = sanitizePath(session.sessionId)
       const tag = sanitizePath(options.containerTag)
       // tx-1e5a5: stamp each nug with its source session so the engine's
-      // session-diversified top-k axis (SessionTagPrefix, default "sess:") can
+      // session-diversified top-k axis (SessionTagPrefix, default "sess-") can
       // group candidates by session at rank time. Additive to the container
       // tag — search --tag scoping is unaffected. Same sanitized id the atom
-      // Name suffix uses.
-      const sessTag = `sess:${safeId}`
+      // Name suffix uses. Prefix is "sess-" (not "sess:"): trixi's tag
+      // sanitizer kebab-cases a colon, so emit the stored form directly.
+      const sessTag = `sess-${safeId}`
 
       // Storage granularity is trixi's policy (extraction stays shared across
       // providers for comparability): store each extracted bullet as its own
