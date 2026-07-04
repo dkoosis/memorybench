@@ -115,10 +115,11 @@ export async function runIngestPhase(
           status: "failed",
           error,
         })
-        logger.error(`Failed to ingest ${question.questionId}: ${error}`)
-        throw new Error(
-          `Ingest failed at ${question.questionId}: ${error}. Fix the issue and resume with the same run ID.`
-        )
+        // Continue the run: a single bad question (e.g. empty haystack) must not
+        // abort a 500-question benchmark. Failed questions are marked and skipped
+        // downstream; resume with the same run ID to retry them.
+        logger.error(`Failed to ingest ${question.questionId}: ${error} (skipping, run continues)`)
+        return { questionId: question.questionId, durationMs: Date.now() - startTime, failed: true }
       }
     },
   })
