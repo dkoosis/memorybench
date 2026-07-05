@@ -49,8 +49,9 @@ export class SupermemoryProvider implements Provider {
   async initialize(config: ProviderConfig): Promise<void> {
     this.client = new Supermemory({
       apiKey: config.apiKey,
+      ...(config.baseUrl ? { baseURL: config.baseUrl } : {}),
     })
-    logger.info(`Initialized Supermemory provider`)
+    logger.info(`Initialized Supermemory provider${config.baseUrl ? ` (baseURL=${config.baseUrl})` : ""}`)
   }
 
   async ingest(sessions: UnifiedSession[], options: IngestOptions): Promise<IngestResult> {
@@ -103,22 +104,37 @@ export class SupermemoryProvider implements Provider {
     const pending = new Set(result.documentIds)
     const completedIds: string[] = []
     const failedIds: string[] = []
-    let backoffMs = 1000
+    // Poll readiness with BOUNDED concurrency. Firing GETs for every pending doc
+    // at once (Promise.allSettled over the whole set) floods the self-hosted
+    // server with hundreds of requests/sec, saturating CPU and starving the
+    // embedding worker. Cap in-flight polls and back off harder — this only
+    // affects how we wait for indexing, not what the benchmark measures.
+    const POLL_CONCURRENCY = 25
+    let backoffMs = 3000
 
     onProgress?.({ completedIds: [], failedIds: [], total })
 
     while (pending.size > 0) {
       const pendingArray = Array.from(pending)
-      const results = await Promise.allSettled(
-        pendingArray.map(async (docId) => {
-          const doc = await this.client!.documents.get(docId)
-          if (doc.status === "done" || doc.status === "failed") {
-            const memory = await this.client!.memories.get(docId)
-            return { docId, docStatus: doc.status, memStatus: memory.status }
-          }
-          return { docId, docStatus: doc.status, memStatus: "pending" }
-        })
-      )
+      const results: PromiseSettledResult<{
+        docId: string
+        docStatus: string
+        memStatus: string
+      }>[] = []
+      for (let i = 0; i < pendingArray.length; i += POLL_CONCURRENCY) {
+        const batch = pendingArray.slice(i, i + POLL_CONCURRENCY)
+        const batchResults = await Promise.allSettled(
+          batch.map(async (docId) => {
+            const doc = await this.client!.documents.get(docId)
+            if (doc.status === "done" || doc.status === "failed") {
+              const memory = await this.client!.memories.get(docId)
+              return { docId, docStatus: doc.status, memStatus: memory.status }
+            }
+            return { docId, docStatus: doc.status, memStatus: "pending" }
+          })
+        )
+        results.push(...batchResults)
+      }
 
       for (const res of results) {
         if (res.status === "fulfilled") {
@@ -137,7 +153,7 @@ export class SupermemoryProvider implements Provider {
 
       if (pending.size > 0) {
         await new Promise((r) => setTimeout(r, backoffMs))
-        backoffMs = Math.min(backoffMs * 1.2, 5000)
+        backoffMs = Math.min(backoffMs * 1.3, 15000)
       }
     }
 
