@@ -431,7 +431,12 @@ export class TrixiProvider implements Provider {
       "--limit",
       String(limit),
     ])
-    const hits = stdout ? (JSON.parse(stdout) as Array<{ id: string; name: string }>) : []
+    // `trixi search --json` returns an envelope { results: [...], total?, route? }
+    // (tx-m4pa/tx-ose1) — no longer a bare array. Parse the results field.
+    const parsed = stdout
+      ? (JSON.parse(stdout) as { results: Array<{ id: string; name: string }>; total?: number })
+      : { results: [] }
+    const hits = parsed.results
     if (hits.length === 0) return []
 
     return Promise.all(
