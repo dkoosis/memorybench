@@ -431,10 +431,20 @@ export class TrixiProvider implements Provider {
     // (beads/files legs are meaningless inside a benchmark container);
     // `--full` puts an excerpt on every hit (2500-byte cap — atomic memories
     // fit whole). No `--tag`: the container's own --db already isolates it.
-    // ask caps nugs at 5 server-side, so options.limit no longer applies
-    // (was 10 per tx-grod0) — the benchmark now measures the door as shipped.
-    void options.limit
-    const stdout = await runTrixi(paths, ["ask", query, "--nugs", "--full", "--json"])
+    // --limit (tx-m92b, needs trixi ≥ f440ad5c): ask defaults to 5 nug hits
+    // (interactive-sized) and that measurably starved multi-fact QA — 64.0 →
+    // 59.6 on trixi130-ask-onedoor (multi-session 53→43). Keep the benchmark
+    // at the tx-grod0-validated 10.
+    const limit = options.limit || 10
+    const stdout = await runTrixi(paths, [
+      "ask",
+      query,
+      "--nugs",
+      "--full",
+      "--json",
+      "--limit",
+      String(limit),
+    ])
     const parsed = stdout
       ? (JSON.parse(stdout) as {
           results: Array<{ source: string; id: string; name: string; excerpt?: string }>
