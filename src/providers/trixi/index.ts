@@ -243,9 +243,18 @@ function searchExistingAtoms(
 }
 
 async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> {
+  // HOME is redirected into the container dir: trixi binaries ≥ tx-kji6 emit
+  // retrieval telemetry to $HOME/.trixi/metrics.db regardless of --db, and
+  // benchmark spawns must never pollute the live reach-rate stream (tx-qw86).
+  // Also skips the $HOME/.trixi daemon probe — container queries always run
+  // cold-direct, never through a same-machine daemon on a different store.
   const proc = Bun.spawn(
     [TRIXI_BIN, "--db", paths.db, "--kg-root", paths.kgRoot, "--config", paths.configDir, ...args],
-    { stdout: "pipe", stderr: "pipe" }
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: paths.dir, CLAUDE_CODE_SESSION_ID: "" },
+    }
   )
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -263,8 +272,9 @@ async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> 
  *
  * Stores extracted memories as `reference` nugs in a Trixi knowledge graph
  * (one isolated kg-root + SQLite store per benchmark container), tagged with
- * the containerTag for scoping. Search shells out to `trixi search` (hybrid
- * lexical/semantic via Voyage embeddings) then fetches bodies via `trixi get`.
+ * the containerTag for scoping. Search shells out to the one-door `trixi ask`
+ * (tx-uurf): a single spawn returns hits with excerpts inline — replaces the
+ * old 1×`trixi search` + N×`trixi get` spawn pattern (tx-qw86.1).
  *
  * Uses the same LLM extraction step as the filesystem/rag providers so the
  * comparison isolates the storage/retrieval engine, not the extraction prompt.
@@ -416,36 +426,23 @@ export class TrixiProvider implements Provider {
 
   async search(query: string, options: SearchOptions): Promise<unknown[]> {
     const paths = containerPaths(options.containerTag)
-    // tx-grod0 decomposition: trixi107-parity (limit 30 + temporal prompt)
-    // scored 0.54 overall with temporal 0.379 — the 30-candidate flood at
-    // ~30% precision buries the answer model. Back to 10; trixi108 isolates
-    // the prompt's effect alone.
-    const limit = options.limit || 10
-
-    const stdout = await runTrixi(paths, [
-      "search",
-      query,
-      "--tag",
-      sanitizePath(options.containerTag),
-      "--json",
-      "--limit",
-      String(limit),
-    ])
-    // `trixi search --json` returns an envelope { results: [...], total?, route? }
-    // (tx-m4pa/tx-ose1) — no longer a bare array. Parse the results field.
+    // One-door `trixi ask` (tx-qw86.1): a single spawn per query — replaces
+    // 1×search + N×get (11 spawns at limit 10). Scoped to the nugs leg
+    // (beads/files legs are meaningless inside a benchmark container);
+    // `--full` puts an excerpt on every hit (2500-byte cap — atomic memories
+    // fit whole). No `--tag`: the container's own --db already isolates it.
+    // ask caps nugs at 5 server-side, so options.limit no longer applies
+    // (was 10 per tx-grod0) — the benchmark now measures the door as shipped.
+    void options.limit
+    const stdout = await runTrixi(paths, ["ask", query, "--nugs", "--full", "--json"])
     const parsed = stdout
-      ? (JSON.parse(stdout) as { results: Array<{ id: string; name: string }>; total?: number })
+      ? (JSON.parse(stdout) as {
+          results: Array<{ source: string; id: string; name: string; excerpt?: string }>
+        })
       : { results: [] }
-    const hits = parsed.results
-    if (hits.length === 0) return []
-
-    return Promise.all(
-      hits.map(async (hit) => {
-        const raw = await runTrixi(paths, ["get", hit.id, "--json"])
-        const nug = JSON.parse(raw) as { id: string; name: string; body: string }
-        return { id: nug.id, name: nug.name, body: nug.body }
-      })
-    )
+    return parsed.results
+      .filter((hit) => hit.source === "nug")
+      .map((hit) => ({ id: hit.id, name: hit.name, body: hit.excerpt ?? "" }))
   }
 
   async clear(containerTag: string): Promise<void> {
