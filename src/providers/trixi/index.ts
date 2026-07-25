@@ -58,27 +58,30 @@ interface AtomicMemory {
 /** Split MEMORY.md-style extraction output ("## Section" headers + "- " bullets)
  * into self-contained atomic memories. Each bullet is one atom: name = bullet
  * text truncated at a word boundary (drives trixi's name-weighted BM25) plus a
- * per-session uniqueness suffix; body = section-prefixed bullet with session
- * date for temporal grounding. */
+ * per-session uniqueness suffix; body = the date (for `parseSessionDate`'s
+ * temporal grounding, prompts.ts:16) plus the bullet — no section label.
+ *
+ * tx-2qm1k: the section header ("Key Facts" for the large majority of
+ * bullets — extraction.ts's most-used category) used to prefix every atom's
+ * body verbatim, and the engine embeds name+body+tags+meta wholesale
+ * (embedder.go:75). That constant label, repeated near-identically across a
+ * whole container's atoms, was diluting the embedding's semantic channel —
+ * ~150 candidates scored ~0.64±0.02 cosine regardless of actual content
+ * (tx-24ran). Dropping the label (keeping only the date, still needed
+ * downstream) leaves the distinctive fact text as the dominant signal. */
 function splitAtomicMemories(extracted: string, session: UnifiedSession): AtomicMemory[] {
   const date =
     (session.metadata?.formattedDate as string) || (session.metadata?.date as string) || ""
   const safeId = sanitizePath(session.sessionId)
   const atoms: AtomicMemory[] = []
-  let section = ""
   for (const line of extracted.split("\n")) {
-    const header = line.match(/^##\s+(.*)/)
-    if (header) {
-      section = header[1].trim()
-      continue
-    }
+    if (/^##\s+/.test(line)) continue
     const bullet = line.match(/^\s*[-*]\s+(.*)/)
     if (!bullet || bullet[1].trim().length < 8) continue
     const text = bullet[1].trim()
     let name = text.length > 80 ? text.slice(0, 80).replace(/\s+\S*$/, "") : text
     name = `${name} (${safeId}#${atoms.length})`
-    const context = [section, date && `(${date})`].filter(Boolean).join(" ")
-    atoms.push({ name, body: context ? `${context}: ${text}` : text, text })
+    atoms.push({ name, body: date ? `(${date}): ${text}` : text, text })
   }
   return atoms
 }
@@ -205,11 +208,7 @@ function ftsQuery(text: string): string {
  *
  * Scoped to the `atom` tag: session-summary nugs contain every topic and
  * their names carry no comparable fact. */
-function searchExistingAtoms(
-  paths: ContainerPaths,
-  tag: string,
-  atoms: AtomicMemory[]
-): ExistingMemory[] {
+function searchExistingAtoms(paths: ContainerPaths, atoms: AtomicMemory[]): ExistingMemory[] {
   let db: Database | null = null
   try {
     // readwrite (not readonly): the store is WAL-mode, and a readonly handle
@@ -218,17 +217,22 @@ function searchExistingAtoms(
     // empty file trixi would then fight over. Only SELECTs run here, and
     // ingest is sequential per container, so no write contention.
     db = new Database(paths.db, { readwrite: true, create: false })
-    const stmt = db.prepare<ExistingMemory, [string, string, string]>(
+    // No container-tag filter: paths.db is already one SQLite file per
+    // container (tx-2qm1k dropped the container tag from `--tags` at create
+    // time — it was redundant here for the same reason, and its being
+    // identical across every atom in the container was flattening embed
+    // similarity).
+    const stmt = db.prepare<ExistingMemory, [string, string]>(
       `SELECT n.id AS id, n.name AS name, n.body AS body
        FROM nugs_fts JOIN nugs n ON n.rowid = nugs_fts.rowid
-       WHERE nugs_fts MATCH ?1 AND n.tags LIKE ?2 AND n.tags LIKE ?3
+       WHERE nugs_fts MATCH ?1 AND n.tags LIKE ?2
        ORDER BY bm25(nugs_fts, 10, 1, 5) LIMIT ${PER_ATOM_LIMIT}`
     )
     const seen = new Map<string, ExistingMemory>()
     for (const atom of atoms) {
       const q = ftsQuery(atom.text)
       if (!q) continue
-      for (const row of stmt.all(q, `%"${tag}"%`, `%"atom"%`)) {
+      for (const row of stmt.all(q, `%"atom"%`)) {
         if (!seen.has(row.id)) seen.set(row.id, { ...row, body: row.body.slice(0, 300) })
       }
       if (seen.size >= MAX_EXISTING) break
@@ -271,8 +275,9 @@ async function runTrixi(paths: ContainerPaths, args: string[]): Promise<string> 
  * Trixi Memory Provider
  *
  * Stores extracted memories as `reference` nugs in a Trixi knowledge graph
- * (one isolated kg-root + SQLite store per benchmark container), tagged with
- * the containerTag for scoping. Search shells out to the one-door `trixi ask`
+ * (one isolated kg-root + SQLite store per benchmark container — the file
+ * boundary is the scoping, no container tag is stamped on nugs; see
+ * tx-2qm1k). Search shells out to the one-door `trixi ask`
  * (tx-uurf): a single spawn returns hits with excerpts inline — replaces the
  * old 1×`trixi search` + N×`trixi get` spawn pattern (tx-qw86.1).
  *
@@ -329,13 +334,17 @@ export class TrixiProvider implements Provider {
     for (const session of sessions) {
       const extractedMemories = await extractMemories(openai, session)
       const safeId = sanitizePath(session.sessionId)
-      const tag = sanitizePath(options.containerTag)
       // tx-1e5a5: stamp each nug with its source session so the engine's
       // session-diversified top-k axis (SessionTagPrefix, default "sess-") can
-      // group candidates by session at rank time. Additive to the container
-      // tag — search --tag scoping is unaffected. Same sanitized id the atom
+      // group candidates by session at rank time. Same sanitized id the atom
       // Name suffix uses. Prefix is "sess-" (not "sess:"): trixi's tag
       // sanitizer kebab-cases a colon, so emit the stored form directly.
+      //
+      // tx-2qm1k: no container tag alongside it (was `${tag},${sessTag}`) —
+      // the container's own --db already isolates it (search() comment
+      // below), so the tag was pure boilerplate, identical across every nug
+      // in the container and diluting embed similarity for no scoping
+      // benefit.
       const sessTag = `sess-${safeId}`
 
       // Storage granularity is trixi's policy (extraction stays shared across
@@ -358,7 +367,7 @@ export class TrixiProvider implements Provider {
       // temporal questions need (temporal 0.52→0.448, overall 0.57→0.55).
       // Re-enable with TRIXI_UPDATE_DECISIONS=1 for E4b iterations.
       const e4Enabled = process.env.TRIXI_UPDATE_DECISIONS === "1"
-      const existing = e4Enabled ? searchExistingAtoms(paths, tag, atoms) : []
+      const existing = e4Enabled ? searchExistingAtoms(paths, atoms) : []
       const decisions = await decideMemoryUpdates(openai, existing, atoms)
       const counts = { ADD: 0, SUPERSEDE: 0, NOOP: 0 }
       for (const d of decisions) counts[d.action]++
@@ -381,7 +390,7 @@ export class TrixiProvider implements Provider {
           "reference",
           `--name=${atom.name}`,
           `--body=${atom.body}`,
-          `--tags=${tag},atom,${sessTag}`,
+          `--tags=atom,${sessTag}`,
         ])
         documentIds.push(id)
         if (decision.action === "SUPERSEDE" && decision.supersedes) {
@@ -398,7 +407,7 @@ export class TrixiProvider implements Provider {
         "reference",
         `--name=${safeId}`,
         `--body=${extractedMemories}`,
-        `--tags=${tag},${sessTag}`,
+        `--tags=${sessTag}`,
       ])
       logger.debug(
         `Created trixi session nug ${id} + ${atoms.length} atoms for session ${session.sessionId}`
