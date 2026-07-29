@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# run-bench — memorybench runner; resolves OPENAI_API_KEY keychain-first for unattended runs (tx-2qm1k)
+#
+# Mirrors dk's metered-per-app playbook (keyring.GetOrEnv): macOS keychain first
+# (service=memorybench, account=openai), env fallback only on confirmed-absent or
+# no keychain backend (Linux/CI). A locked/denied keychain is a HARD error, never
+# silently downgraded — so an autonomous run can't proceed keyless (the failure that
+# left tx-2qm1k's AC unconfirmed under a keyless /team wave).
+#
+# Usage: scripts/run-bench <memorybench-cli-args...>
+#   scripts/run-bench run -p trixi -b locomo -l 10
+#   scripts/run-bench --check          # resolve + validate preconditions, run nothing
+set -euo pipefail
+
+SECURITY=/usr/bin/security   # absolute — PATH-hijack guard (playbook 4901f9b266cf)
+SERVICE=memorybench
+ACCOUNT=openai
+
+die() { echo "run-bench: $*" >&2; exit 1; }
+
+resolve_openai_key() {
+  # 1. keychain-first
+  if [[ -x "$SECURITY" ]]; then
+    local key rc
+    key=$("$SECURITY" find-generic-password -s "$SERVICE" -a "$ACCOUNT" -w 2>/dev/null) && rc=0 || rc=$?
+    if [[ ${rc:-0} -eq 0 && -n "$key" ]]; then
+      export OPENAI_API_KEY="$key"
+      return 0
+    fi
+    # 44 = errSecItemNotFound → fall through to env. Any other non-zero = locked/
+    # denied/unreadable → hard error, do NOT mask a reachable-but-denied keychain.
+    if [[ ${rc:-0} -ne 44 && ${rc:-0} -ne 0 ]]; then
+      die "keychain $SERVICE/$ACCOUNT unreadable (security exit $rc) — unlock login keychain or grant access; refusing to fall back to env"
+    fi
+  fi
+  # 2. env fallback (CI secret / already-exported)
+  [[ -n "${OPENAI_API_KEY:-}" ]] && return 0
+  die "OPENAI_API_KEY not in keychain ($SERVICE/$ACCOUNT) or env.
+  add it: read -rs K; $SECURITY add-generic-password -U -s $SERVICE -a $ACCOUNT -w \"\$K\"; unset K"
+}
+
+resolve_openai_key
+case "$OPENAI_API_KEY" in
+  sk-*) : ;;
+  *) die "resolved OPENAI_API_KEY does not start with sk- — wrong value stored" ;;
+esac
+
+# trixi provider shells out to the trixi binary
+command -v trixi >/dev/null 2>&1 || die "trixi not on PATH (trixi provider requires it)"
+
+if [[ "${1:-}" == "--check" ]]; then
+  echo "run-bench: OK — OPENAI_API_KEY resolved (${#OPENAI_API_KEY} chars, ${OPENAI_API_KEY:0:7}…), trixi=$(command -v trixi)"
+  exit 0
+fi
+
+cd "$(dirname "$0")/.."
+exec bun run src/index.ts "$@"
