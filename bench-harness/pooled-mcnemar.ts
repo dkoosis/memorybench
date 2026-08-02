@@ -24,7 +24,7 @@
 import { readFileSync, existsSync } from "node:fs"
 import { join } from "node:path"
 
-const RUNS_DIR = join(import.meta.dir, "data", "runs")
+const RUNS_DIR = join(import.meta.dir, "..", "data", "runs")
 
 // ---- arg parsing ----------------------------------------------------------
 

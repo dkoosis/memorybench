@@ -2,8 +2,8 @@
 // trixi115-dated, search-onward reset) and add the 200 questions never ingested
 // for trixi. New binary (trixi-9c30cc86) defaults session_diversity_weight 0.8,
 // so search across all 500 exercises the adopted knob with no YAML overrides.
-import { CheckpointManager } from "./src/orchestrator"
-import LongMemEvalBenchmark from "./src/benchmarks/longmemeval/index"
+import { CheckpointManager } from "../src/orchestrator"
+import LongMemEvalBenchmark from "../src/benchmarks/longmemeval/index"
 
 const RUN_ID = "trixi129-w08-full500"
 const cm = new CheckpointManager()

@@ -1,8 +1,8 @@
 // Smoke: ingest one LongMemEval haystack into local supermemory, search it back.
 // Validates baseURL wiring + local server path. Run: bun run smoke-sm-local.ts
-import LongMemEvalBenchmark from "./src/benchmarks/longmemeval/index"
-import SupermemoryProvider from "./src/providers/supermemory/index"
-import { getProviderConfig } from "./src/utils/config"
+import LongMemEvalBenchmark from "../src/benchmarks/longmemeval/index"
+import SupermemoryProvider from "../src/providers/supermemory/index"
+import { getProviderConfig } from "../src/utils/config"
 
 const QID = "6d550036"
 const bench = new LongMemEvalBenchmark()

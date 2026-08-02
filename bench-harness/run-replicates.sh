@@ -9,7 +9,7 @@ LOG=data/runs/replicates-20260703.log
 
 run_arm() {
   local knob="$1" runid="$2"
-  ./knob-full.sh "$knob" >>"$LOG" 2>&1
+  bench-harness/knob-full.sh "$knob" >>"$LOG" 2>&1
   echo "=== $(date '+%H:%M:%S') START $runid (knob=$knob) ===" >>"$LOG"
   bun run src/index.ts run -r "$runid" >>"$LOG" 2>&1
   echo "=== $(date '+%H:%M:%S') DONE $runid ===" >>"$LOG"
@@ -21,5 +21,5 @@ run_arm strip trixi125-rep2-ctl
 run_arm 0.8   trixi126-rep2-w08
 run_arm strip trixi127-rep3-ctl
 run_arm 0.8   trixi128-rep3-w08
-./knob-full.sh strip >>"$LOG" 2>&1   # leave configs clean
+bench-harness/knob-full.sh strip >>"$LOG" 2>&1   # leave configs clean
 echo "ALL REPLICATES COMPLETE" >>"$LOG"

@@ -1,7 +1,7 @@
 // Merge all sm-clean500-cNN chunk checkpoints into one sm-clean500 checkpoint,
 // then the report phase can be run over it for the final 500-question score.
 // Usage: bun run chunk-merge.ts <mergedRunId> <chunkPrefix> <nChunks>
-import { CheckpointManager } from "./src/orchestrator/checkpoint"
+import { CheckpointManager } from "../src/orchestrator/checkpoint"
 import { existsSync, cpSync } from "fs"
 
 const [mergedId, prefix, nStr] = process.argv.slice(2)

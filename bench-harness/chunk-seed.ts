@@ -2,8 +2,8 @@
 // Usage: bun run chunk-seed.ts <runId> <start> <count>
 // Creates the checkpoint AND initializes its questions (the resume path in the
 // orchestrator does NOT init questions — only the new-run path does — so we do it here).
-import { CheckpointManager } from "./src/orchestrator/checkpoint"
-import LongMemEvalBenchmark from "./src/benchmarks/longmemeval/index"
+import { CheckpointManager } from "../src/orchestrator/checkpoint"
+import LongMemEvalBenchmark from "../src/benchmarks/longmemeval/index"
 
 const [runId, startStr, countStr] = process.argv.slice(2)
 if (!runId || startStr === undefined || countStr === undefined) {

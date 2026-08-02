@@ -1,4 +1,4 @@
-import { CheckpointManager } from "./src/orchestrator"
+import { CheckpointManager } from "../src/orchestrator"
 import { readFileSync } from "fs"
 const cm = new CheckpointManager()
 const qids = readFileSync("/tmp/all300_qids.txt", "utf8").split("\n").map(s => s.trim()).filter(Boolean)
