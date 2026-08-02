@@ -123,7 +123,7 @@ export class SupermemoryProvider implements Provider {
     const response = await this.client.search.memories({
       q: query,
       containerTag: options.containerTag,
-      limit: 30,
+      limit: options.limit ?? 30,
       threshold: options.threshold || 0.3,
 			searchMode: "hybrid",
 			include: {
