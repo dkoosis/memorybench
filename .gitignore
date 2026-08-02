@@ -16,3 +16,9 @@ ui/tsconfig.tsbuildinfo
 # session tooling artifacts
 bin/
 .env.local.bak
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
