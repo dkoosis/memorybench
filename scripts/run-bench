@@ -1,55 +1,83 @@
 #!/usr/bin/env bash
-# run-bench — memorybench runner; resolves OPENAI_API_KEY keychain-first for unattended runs (tx-2qm1k)
+# run-bench — memorybench runner; resolves provider keys keychain-first for unattended runs (tx-2qm1k, mb-nde)
 #
 # Mirrors dk's metered-per-app playbook (keyring.GetOrEnv): macOS keychain first
-# (service=memorybench, account=openai), env fallback only on confirmed-absent or
+# (service=memorybench, account=<provider>), env fallback only on confirmed-absent or
 # no keychain backend (Linux/CI). A locked/denied keychain is a HARD error, never
 # silently downgraded — so an autonomous run can't proceed keyless (the failure that
 # left tx-2qm1k's AC unconfirmed under a keyless /team wave).
 #
+# OPENAI_API_KEY is always resolved (every provider/judge needs it for extraction or
+# as the default judge). ANTHROPIC_API_KEY is resolved only when -j/--judge selects an
+# Anthropic model (sonnet-*, opus-*, haiku-*, or a bare claude-* id) — mirrors
+# src/utils/models.ts's alias/prefix resolution so the bash judge sniff stays in sync.
+#
 # Usage: scripts/run-bench <memorybench-cli-args...>
 #   scripts/run-bench run -p trixi -b locomo -l 10
+#   scripts/run-bench run -p trixi -b locomo -l 10 -j sonnet-4.5
 #   scripts/run-bench --check          # resolve + validate preconditions, run nothing
 set -euo pipefail
 
 SECURITY=/usr/bin/security   # absolute — PATH-hijack guard (playbook 4901f9b266cf)
 SERVICE=memorybench
-ACCOUNT=openai
 
 die() { echo "run-bench: $*" >&2; exit 1; }
 
-resolve_openai_key() {
-  # 1. keychain-first
+resolve_key() {
+  # $1=account $2=env var name; exports $2 on success, dies on locked/absent keychain+env
+  local account="$1" var="$2"
   if [[ -x "$SECURITY" ]]; then
     local key rc
-    key=$("$SECURITY" find-generic-password -s "$SERVICE" -a "$ACCOUNT" -w 2>/dev/null) && rc=0 || rc=$?
+    key=$("$SECURITY" find-generic-password -s "$SERVICE" -a "$account" -w 2>/dev/null) && rc=0 || rc=$?
     if [[ ${rc:-0} -eq 0 && -n "$key" ]]; then
-      export OPENAI_API_KEY="$key"
+      export "$var=$key"
       return 0
     fi
     # 44 = errSecItemNotFound → fall through to env. Any other non-zero = locked/
     # denied/unreadable → hard error, do NOT mask a reachable-but-denied keychain.
     if [[ ${rc:-0} -ne 44 && ${rc:-0} -ne 0 ]]; then
-      die "keychain $SERVICE/$ACCOUNT unreadable (security exit $rc) — unlock login keychain or grant access; refusing to fall back to env"
+      die "keychain $SERVICE/$account unreadable (security exit $rc) — unlock login keychain or grant access; refusing to fall back to env"
     fi
   fi
-  # 2. env fallback (CI secret / already-exported)
-  [[ -n "${OPENAI_API_KEY:-}" ]] && return 0
-  die "OPENAI_API_KEY not in keychain ($SERVICE/$ACCOUNT) or env.
-  add it: read -rs K; $SECURITY add-generic-password -U -s $SERVICE -a $ACCOUNT -w \"\$K\"; unset K"
+  # env fallback (CI secret / already-exported)
+  [[ -n "${!var:-}" ]] && return 0
+  die "$var not in keychain ($SERVICE/$account) or env.
+  add it: keyring set $SERVICE $account"
 }
 
-resolve_openai_key
+# judge model selects the anthropic key only when -j/--judge names a Claude model
+judge=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [[ "${args[$i]}" == "-j" || "${args[$i]}" == "--judge" ]]; then
+    judge="${args[$((i + 1))]:-}"
+    break
+  fi
+done
+judge_is_anthropic=false
+case "$judge" in
+  sonnet-* | opus-* | haiku-* | claude-*) judge_is_anthropic=true ;;
+esac
+
+resolve_key openai OPENAI_API_KEY
 case "$OPENAI_API_KEY" in
   sk-*) : ;;
   *) die "resolved OPENAI_API_KEY does not start with sk- — wrong value stored" ;;
 esac
 
+if [[ "$judge_is_anthropic" == true ]]; then
+  resolve_key anthropic ANTHROPIC_API_KEY
+  case "$ANTHROPIC_API_KEY" in
+    sk-ant-*) : ;;
+    *) die "resolved ANTHROPIC_API_KEY does not start with sk-ant- — wrong value stored" ;;
+  esac
+fi
+
 # trixi provider shells out to the trixi binary
 command -v trixi >/dev/null 2>&1 || die "trixi not on PATH (trixi provider requires it)"
 
 if [[ "${1:-}" == "--check" ]]; then
-  echo "run-bench: OK — OPENAI_API_KEY resolved (${#OPENAI_API_KEY} chars, ${OPENAI_API_KEY:0:7}…), trixi=$(command -v trixi)"
+  echo "run-bench: OK — OPENAI_API_KEY resolved (${#OPENAI_API_KEY} chars, ${OPENAI_API_KEY:0:7}…)$([[ "$judge_is_anthropic" == true ]] && echo ", ANTHROPIC_API_KEY resolved (${#ANTHROPIC_API_KEY} chars)"), trixi=$(command -v trixi)"
   exit 0
 fi
 
