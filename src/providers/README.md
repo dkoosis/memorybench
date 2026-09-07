@@ -55,3 +55,4 @@ Example: See `src/providers/zep/prompts.ts`
 | `supermemory` | `supermemory` | Raw JSON sessions |
 | `mem0` | `mem0ai` | v2 API with graph |
 | `zep` | `@getzep/zep-cloud` | Graph-based, custom prompts |
+| `itzy` | `itzy` CLI | Vault of markdown nugs; writes via `itzy nug --batch`, reads via `itzy ask`. `ITZY_BIN` overrides the binary. |
