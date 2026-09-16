@@ -81,6 +81,10 @@ Available providers for storing and retrieving memories:
                  Extracts memories via LLM, stores as reference nugs, hybrid lexical/semantic search via the trixi CLI.
                  Requires: OPENAI_API_KEY (for memory extraction via gpt-4o-mini); trixi binary on PATH.
 
+  mnemd          mnemd nugbase (human-owned memory)
+                 Extracts memories via LLM, stores as nugs via 'mnemd capture', lexical word search via 'mnemd recall'.
+                 Requires: OPENAI_API_KEY (for memory extraction via gpt-4o-mini); mnemd binary on PATH.
+
 Usage:
   -p supermemory    Use Supermemory as the memory provider
   -p mem0           Use Mem0 as the memory provider
@@ -88,6 +92,7 @@ Usage:
   -p filesystem     Use file-based memory (CLAUDE.md style)
   -p rag            Use hybrid RAG memory (OpenClaw/QMD style)
   -p trixi          Use the trixi nug store as the memory provider
+  -p mnemd          Use the mnemd nugbase as the memory provider
 `)
 }
 
