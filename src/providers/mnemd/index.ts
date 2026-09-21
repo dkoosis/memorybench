@@ -13,6 +13,7 @@ import type { UnifiedSession } from "../../types/unified"
 import { logger } from "../../utils/logger"
 import { extractMemories } from "../../prompts/extraction"
 import { MNEMD_PROMPTS } from "./prompts"
+import { formulateQuery } from "./formulate"
 
 const BASE_DIR = join(process.cwd(), "data", "providers", "mnemd")
 const MNEMD_BIN = process.env.MNEMD_BIN || "mnemd"
@@ -218,17 +219,23 @@ export class MnemdProvider implements Provider {
     })
   }
 
+  /** mn-cw8: formulate before recall. The benchmark hands search() the raw
+   * question; a real mnemd caller is an agent that turns dk's intent into
+   * query words first (see formulate.ts). Formulation failure falls back to
+   * the raw question rather than aborting the search phase. */
   async search(query: string, options: SearchOptions): Promise<unknown[]> {
+    if (!this.openai) throw new Error("Provider not initialized")
     const nugbase = nugbasePath(options.containerTag)
     // Limit 10, matching the harness's retrieval_k and itzy/trixi's tuned
     // value.
     const limit = options.limit || 10
+    const formulated = await formulateQuery(this.openai, query)
     const { stdout, exitCode, stderr } = await runMnemd(nugbase, [
       "recall",
       "--limit",
       String(limit),
       "--",
-      query,
+      formulated,
     ])
     if (exitCode !== 0) {
       throw new Error(`mnemd recall failed (exit ${exitCode}): ${stderr || stdout}`)
