@@ -14,6 +14,7 @@ import { logger } from "../../utils/logger"
 import { extractMemories } from "../../prompts/extraction"
 import { MNEMD_PROMPTS } from "./prompts"
 import { formulateQuery } from "./formulate"
+import { writeNugs } from "./nugfile"
 
 const BASE_DIR = join(process.cwd(), "data", "providers", "mnemd")
 const MNEMD_BIN = process.env.MNEMD_BIN || "mnemd"
@@ -99,11 +100,18 @@ async function runMnemd(
   args: string[],
   stdin?: string
 ): Promise<{ stdout: string; exitCode: number; stderr: string }> {
+  // `mnemd index` also ingests $MNEMD_PROJECTS checkouts and
+  // $MNEMD_INGEST_CLAUDE_MEMORY (mnemd --help); dk's shell sets both for his
+  // real nugbase. Unset here so a benchmark container holds its haystack and
+  // nothing else.
+  const env: Record<string, string | undefined> = { ...process.env, MNEMD_NUGBASE: nugbase }
+  delete env.MNEMD_PROJECTS
+  delete env.MNEMD_INGEST_CLAUDE_MEMORY
   const proc = Bun.spawn([MNEMD_BIN, ...args], {
     stdout: "pipe",
     stderr: "pipe",
     stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
-    env: { ...process.env, MNEMD_NUGBASE: nugbase },
+    env,
   })
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -119,10 +127,18 @@ async function runMnemd(
  * Stores each extracted memory as a nug in an isolated mnemd nugbase (one
  * directory per benchmark container) and answers with `mnemd recall`.
  *
- * ‡ WRITES AND READS GO THROUGH THE CLI ONLY (bead mn-a5e, Rules). mnemd has
- * no batch-capture verb the way `itzy nug --batch` does, so ingest pays one
- * spawn per atom rather than one per session — the CLI mnemd ships today has
- * no cheaper door.
+ * ‡ INGEST WRITES FILES; ONE `mnemd index` PER CONTAINER (mn-qgk). The
+ * first cut spawned `mnemd capture` once per atom (bead mn-a5e: no batch
+ * verb); at several hundred atoms per LongMemEval haystack that was ~2
+ * minutes a question and ~17 hours for the 500-question set. Files are
+ * mnemd's truth (ADR 0009) and `mnemd index` is its one bulk door — scan,
+ * reindex, adopt — so ingest() writes each atom as a nug file in the
+ * container's inbox exactly as capture would (nugfile.ts) and
+ * awaitIndexing() runs index once when the haystack is complete. Recall's
+ * cache is never rebuilt on its own once it exists (standard-latency: "a
+ * cache that opens, stale rows and all, is read"), so that one index call is
+ * load-bearing: search() without it would answer from whatever was indexed
+ * last. Reads still go through the CLI only.
  *
  * ‡ ATOMS ONLY, no session-summary nug — mirrors itzy's choice and for the
  * same reason: mnemd's recall is a lexical word match over stored text
@@ -130,12 +146,13 @@ async function runMnemd(
  * whole-session summary would carry many times an atom's matching terms and
  * outrank the atom that actually answers the question.
  *
- * ‡ EVERY CAPTURE/RECALL ARGUMENT CROSSES `--` (mnemd --help: "Flags go
- * before the words; -- ends them, so after -- a word may start with a
- * dash."). An extracted bullet routinely starts with "-" (e.g. "--seed
- * accepts whole numbers only", the exact case itzy/trixi's comments call
- * out) and mnemd parses that as an unknown flag without the terminator —
- * confirmed by spawning `mnemd capture` both ways against a scratch nugbase.
+ * ‡ EVERY RECALL ARGUMENT CROSSES `--` (mnemd --help: "Flags go before the
+ * words; -- ends them, so after -- a word may start with a dash."). A
+ * formulated query can start with "-" (e.g. "--seed accepts whole numbers
+ * only", the exact case itzy/trixi's comments call out) and mnemd parses
+ * that as an unknown flag without the terminator — confirmed by spawning
+ * both ways against a scratch nugbase. Atoms no longer cross argv at all
+ * (they are file bodies), which removes the same hazard from the write side.
  */
 export class MnemdProvider implements Provider {
   name = "mnemd"
@@ -170,48 +187,39 @@ export class MnemdProvider implements Provider {
     await mkdir(nugbase, { recursive: true })
 
     const documentIds: string[] = []
+    const generator = `memorybench/mnemd-provider (${this.mnemdVersion ?? "unknown"})`
     for (const session of sessions) {
       const extracted = await extractMemories(this.openai, session)
       const atoms = splitAtomicMemories(extracted, session)
-      let failed = 0
-      for (const atom of atoms) {
-        if (!atom.body) continue
-        const { stdout, exitCode, stderr } = await runMnemd(nugbase, ["capture", "--", atom.body])
-        // capture prints "<id>  <path>" on success, even in the rare
-        // held-but-not-durable case (cmd/mnemd/main.go reportCapture), so a
-        // parseable line on stdout is success whatever the exit code says.
-        const id = stdout.split("  ")[0]?.trim()
-        if (id && /^[0-9a-f]+$/.test(id)) {
-          documentIds.push(id)
-        } else {
-          failed++
-          logger.warn(
-            `mnemd capture failed for an atom of ${session.sessionId} (exit ${exitCode}): ${stderr || stdout}`
-          )
-        }
-      }
-      if (failed > 0) {
-        logger.warn(
-          `mnemd: ${failed}/${atoms.length} atom(s) failed to capture for ${session.sessionId}`
-        )
-      }
-      logger.debug(
-        `mnemd captured ${atoms.length - failed}/${atoms.length} record(s) for session ${session.sessionId}`
+      const ids = await writeNugs(
+        nugbase,
+        atoms.map((a) => a.body),
+        { generator }
       )
+      documentIds.push(...ids)
+      logger.debug(`mnemd wrote ${ids.length} nug file(s) for session ${session.sessionId}`)
     }
 
     return { documentIds }
   }
 
-  /** Nothing to wait for: `mnemd capture` returns once the nug is durable,
-   * and recall's cache is rebuilt cold on demand when it has not seen a
-   * write (reportFreshness in cmd/mnemd/main.go). The callback still fires
-   * so the harness's progress tracker completes. */
+  /** The one index build per container: every nug file ingest() wrote is
+   * taken into the recall cache here, in one `mnemd index`. The harness calls
+   * this once per question after every session of its haystack is ingested
+   * (orchestrator/phases/indexing.ts), which is exactly the batch boundary.
+   * A failed index is a failed question, not a warning: search() would
+   * otherwise answer from an empty or stale cache and score a silent zero. */
   async awaitIndexing(
     result: IngestResult,
-    _containerTag: string,
+    containerTag: string,
     onProgress?: IndexingProgressCallback
   ): Promise<void> {
+    const nugbase = nugbasePath(containerTag)
+    const { stdout, exitCode, stderr } = await runMnemd(nugbase, ["index"])
+    if (exitCode !== 0) {
+      throw new Error(`mnemd index failed (exit ${exitCode}): ${stderr || stdout}`)
+    }
+    logger.debug(`mnemd index for ${containerTag}: ${stdout.split("\n").join("; ")}`)
     onProgress?.({
       completedIds: result.documentIds,
       failedIds: [],
