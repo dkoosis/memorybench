@@ -6,7 +6,6 @@ import { ZepProvider } from "./zep"
 import { FilesystemProvider } from "./filesystem"
 import { RAGProvider } from "./rag"
 import { TrixiProvider } from "./trixi"
-import { ItzyProvider } from "./itzy"
 import { MnemdProvider } from "./mnemd"
 
 const providers: Record<ProviderName, new () => Provider> = {
@@ -16,7 +15,6 @@ const providers: Record<ProviderName, new () => Provider> = {
   filesystem: FilesystemProvider,
   rag: RAGProvider,
   trixi: TrixiProvider,
-  itzy: ItzyProvider,
   mnemd: MnemdProvider,
 }
 
@@ -52,6 +50,5 @@ export {
   FilesystemProvider,
   RAGProvider,
   TrixiProvider,
-  ItzyProvider,
   MnemdProvider,
 }
