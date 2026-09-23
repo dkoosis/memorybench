@@ -54,5 +54,4 @@ export type ProviderName =
   | "filesystem"
   | "rag"
   | "trixi"
-  | "itzy"
   | "mnemd"

@@ -32,8 +32,6 @@ export function getProviderConfig(provider: string): { apiKey: string; baseUrl?:
       return { apiKey: config.openaiApiKey } // RAG provider uses OpenAI for embeddings
     case "trixi":
       return { apiKey: config.openaiApiKey } // Trixi provider uses OpenAI for memory extraction
-    case "itzy":
-      return { apiKey: config.openaiApiKey } // Itzy provider uses OpenAI for memory extraction
     case "mnemd":
       return { apiKey: config.openaiApiKey } // mnemd provider uses OpenAI for memory extraction
     default:
