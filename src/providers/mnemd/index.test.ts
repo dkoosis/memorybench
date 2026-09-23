@@ -124,3 +124,38 @@ describe("sanitizePath", () => {
     expect(sanitizePath("container tag/with:colons")).toBe("container_tag_with_colons")
   })
 })
+
+// One index build per container against the real binary: the files
+// nugfile.ts writes are what `mnemd index` takes in, and recall answers from
+// them. Skipped where mnemd is not on PATH (CI without the binary).
+const MNEMD_BIN = process.env.MNEMD_BIN || "mnemd"
+const haveMnemd = Bun.which(MNEMD_BIN) !== null
+
+describe.skipIf(!haveMnemd)("mnemd index takes in the files ingest wrote", () => {
+  test("recall finds a batch-written nug after one index", async () => {
+    const { mkdtemp } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const { join } = await import("node:path")
+    const { writeNugs } = await import("./nugfile")
+    const nugbase = await mkdtemp(join(tmpdir(), "mnemd-index-"))
+    const [id] = await writeNugs(nugbase, ["Alice adopted a kitten named Milo"], {
+      generator: "test",
+    })
+    const env: Record<string, string | undefined> = { ...process.env, MNEMD_NUGBASE: nugbase }
+    delete env.MNEMD_PROJECTS
+    delete env.MNEMD_INGEST_CLAUDE_MEMORY
+    const run = async (args: string[]) => {
+      const proc = Bun.spawn([MNEMD_BIN, ...args], { stdout: "pipe", stderr: "pipe", env })
+      const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited])
+      return { stdout, code }
+    }
+    const index = await run(["index"])
+    expect(index.code).toBe(0)
+    expect(index.stdout).toContain("indexed 1 nug")
+    const recall = await run(["recall", "--", "kitten"])
+    expect(recall.code).toBe(0)
+    const hits = parseRecallOutput(recall.stdout)
+    expect(hits.map((h) => h.id)).toEqual([id])
+    expect(hits[0].body).toBe("Alice adopted a kitten named Milo")
+  })
+})
