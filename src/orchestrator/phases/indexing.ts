@@ -4,6 +4,7 @@ import { CheckpointManager } from "../checkpoint"
 import { logger } from "../../utils/logger"
 import { ConcurrentExecutor } from "../concurrent"
 import { resolveConcurrency } from "../../types/concurrency"
+import { groupBy } from "../haystack"
 
 function getEpisodeCount(question: QuestionCheckpoint): number {
   const ingestResult = question.phases.ingest.ingestResult
@@ -116,29 +117,43 @@ export async function runIndexingPhase(
 
   tracker.display()
 
+  // One awaitIndexing per container: questions sharing a haystack were ingested
+  // into one container and carry the same ingestResult (see phases/ingest.ts).
+  const groups = [...groupBy(toIndex, (q) => q.containerTag).entries()].map(
+    ([containerTag, members]) => ({ containerTag, members })
+  )
+
   await ConcurrentExecutor.execute(
-    toIndex,
+    groups,
     concurrency,
     checkpoint.runId,
     "indexing",
-    async ({ item: question }) => {
+    async ({ item: group }) => {
+      const { containerTag, members } = group
+      const question = members[0]
       const ingestResult = question.phases.ingest.ingestResult
       const episodeCount = getEpisodeCount(question)
 
+      const markAll = (patch: Record<string, unknown>) => {
+        for (const q of members) {
+          checkpointManager.updatePhase(checkpoint, q.questionId, "indexing", patch)
+        }
+      }
+
       if (!ingestResult || episodeCount === 0) {
-        checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
+        markAll({
           status: "completed",
           completedIds: [],
           failedIds: [],
           completedAt: new Date().toISOString(),
           durationMs: 0,
         })
-        tracker.markQuestionDone(question.questionId)
+        for (const q of members) tracker.markQuestionDone(q.questionId)
         return { questionId: question.questionId, durationMs: 0 }
       }
 
       const startTime = Date.now()
-      checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
+      markAll({
         status: "in_progress",
         completedIds: [],
         failedIds: [],
@@ -152,11 +167,11 @@ export async function runIndexingPhase(
           total: episodeCount,
         }
 
-        await provider.awaitIndexing(ingestResult, question.containerTag, (progress) => {
+        await provider.awaitIndexing(ingestResult, containerTag, (progress) => {
           lastProgress = progress
-          tracker.update(question.questionId, progress)
+          for (const q of members) tracker.update(q.questionId, progress)
 
-          checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
+          markAll({
             status: "in_progress",
             completedIds: progress.completedIds,
             failedIds: progress.failedIds,
@@ -164,7 +179,7 @@ export async function runIndexingPhase(
         })
 
         const durationMs = Date.now() - startTime
-        checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
+        markAll({
           status: "completed",
           completedIds: lastProgress.completedIds,
           failedIds: lastProgress.failedIds,
@@ -175,13 +190,10 @@ export async function runIndexingPhase(
         return { questionId: question.questionId, durationMs }
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e)
-        checkpointManager.updatePhase(checkpoint, question.questionId, "indexing", {
-          status: "failed",
-          error,
-        })
-        logger.error(`\nFailed to index ${question.questionId}: ${error}`)
+        markAll({ status: "failed", error })
+        logger.error(`\nFailed to index ${containerTag}: ${error}`)
         throw new Error(
-          `Indexing failed at ${question.questionId}: ${error}. Fix the issue and resume with the same run ID.`
+          `Indexing failed at ${containerTag}: ${error}. Fix the issue and resume with the same run ID.`
         )
       }
     }

@@ -161,10 +161,15 @@ Available benchmark datasets for evaluation:
                  Tests: user facts, assistant facts, preferences, implicit connections
                  Source: HuggingFace Salesforce/ConvoMem (downloaded on first use)
 
+  beam128k       BEAM 128K tier - 20 conversations, 10 memory abilities x 2 probes each
+                 Tests: abstention, contradiction resolution, knowledge update, temporal, ...
+                 Source: GitHub mohammadtavakoli78/BEAM chats/100K (downloaded on first use)
+
 Usage:
   -b locomo        Run LoCoMo benchmark
   -b longmemeval   Run LongMemEval benchmark
   -b convomem      Run ConvoMem benchmark
+  -b beam128k      Run BEAM 128K tier (10 memory abilities)
 `)
 }
 
