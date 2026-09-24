@@ -78,9 +78,12 @@ export async function runIngestPhase(
         for (const sid of ph.completedSessions) {
           if (!completedSessions.includes(sid)) completedSessions.push(sid)
         }
-        if (ph.ingestResult) {
-          combinedResult.documentIds.push(...ph.ingestResult.documentIds)
-          if (ph.ingestResult.taskIds) combinedResult.taskIds!.push(...ph.ingestResult.taskIds)
+        // Every sharing question carries the same snapshot, so ids are merged once.
+        for (const id of ph.ingestResult?.documentIds ?? []) {
+          if (!combinedResult.documentIds.includes(id)) combinedResult.documentIds.push(id)
+        }
+        for (const id of ph.ingestResult?.taskIds ?? []) {
+          if (!combinedResult.taskIds!.includes(id)) combinedResult.taskIds!.push(id)
         }
       }
 
@@ -104,7 +107,15 @@ export async function runIngestPhase(
           }
 
           completedSessions.push(session.sessionId)
-          markAll({ completedSessions: [...completedSessions] })
+          // The snapshot rides with the session list, so a crash before the
+          // haystack completes loses no document a resumed run will skip.
+          markAll({
+            completedSessions: [...completedSessions],
+            ingestResult: {
+              documentIds: [...combinedResult.documentIds],
+              ...(combinedResult.taskIds?.length ? { taskIds: [...combinedResult.taskIds] } : {}),
+            },
+          })
         }
 
         if (combinedResult.taskIds && combinedResult.taskIds.length === 0) {

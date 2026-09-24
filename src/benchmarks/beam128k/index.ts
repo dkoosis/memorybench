@@ -203,7 +203,7 @@ export class Beam128kBenchmark implements Benchmark {
         }
         const messages: UnifiedMessage[] = turn.map((m) => ({
           role: m.role,
-          content: m.role === "user" ? stripMarker(m.content) : m.content,
+          content: stripMarker(m.content),
         }))
         sessions.push({
           sessionId: `${haystackId}-t${turnNo}`,

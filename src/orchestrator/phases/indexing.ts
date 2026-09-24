@@ -13,23 +13,33 @@ function getEpisodeCount(question: QuestionCheckpoint): number {
 }
 
 class IndexingProgressTracker {
-  private progressByQuestion: Map<string, { completed: number; failed: number; total: number }> =
+  // Progress is per container: questions sharing a haystack share its episodes,
+  // so whichever of them reports, the one row moves.
+  private progressByContainer: Map<string, { completed: number; failed: number; total: number }> =
     new Map()
+  private containerOf: Map<string, string> = new Map()
   private totalEpisodes: number = 0
   private lastDisplayed: string = ""
 
   constructor(questions: QuestionCheckpoint[]) {
     for (const q of questions) {
+      this.containerOf.set(q.questionId, q.containerTag)
+      if (this.progressByContainer.has(q.containerTag)) continue
       const count = getEpisodeCount(q)
       this.totalEpisodes += count
-      this.progressByQuestion.set(q.questionId, { completed: 0, failed: 0, total: count })
+      this.progressByContainer.set(q.containerTag, { completed: 0, failed: 0, total: count })
     }
   }
 
+  private rowFor(questionId: string) {
+    const tag = this.containerOf.get(questionId)
+    return tag === undefined ? undefined : { tag, row: this.progressByContainer.get(tag) }
+  }
+
   update(questionId: string, progress: IndexingProgress): void {
-    const current = this.progressByQuestion.get(questionId)
-    if (current) {
-      this.progressByQuestion.set(questionId, {
+    const r = this.rowFor(questionId)
+    if (r?.row) {
+      this.progressByContainer.set(r.tag, {
         completed: progress.completedIds.length,
         failed: progress.failedIds.length,
         total: progress.total,
@@ -39,12 +49,12 @@ class IndexingProgressTracker {
   }
 
   markQuestionDone(questionId: string): void {
-    const current = this.progressByQuestion.get(questionId)
-    if (current) {
-      this.progressByQuestion.set(questionId, {
-        completed: current.total,
-        failed: current.failed,
-        total: current.total,
+    const r = this.rowFor(questionId)
+    if (r?.row) {
+      this.progressByContainer.set(r.tag, {
+        completed: r.row.total,
+        failed: r.row.failed,
+        total: r.row.total,
       })
     }
   }
@@ -52,7 +62,7 @@ class IndexingProgressTracker {
   getAggregated(): { completed: number; failed: number; total: number } {
     let completed = 0
     let failed = 0
-    for (const p of this.progressByQuestion.values()) {
+    for (const p of this.progressByContainer.values()) {
       completed += p.completed
       failed += p.failed
     }

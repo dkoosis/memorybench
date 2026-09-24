@@ -128,4 +128,40 @@ describe("shared haystacks through ingest and indexing", () => {
       expect(cp.questions[q.questionId].phases.indexing.status).toBe("completed")
     }
   })
+
+  test("a haystack that fails mid-ingest resumes with every earlier session's documents kept", async () => {
+    const base = await mkdtemp(join(tmpdir(), "mb-haystack-resume-"))
+    const cm = new CheckpointManager(base)
+    const bench = fakeBenchmark()
+    const cp = cm.create("run", "counting", "fake", "judge", "answerer", {})
+    for (const q of bench.getQuestions()) {
+      cm.initQuestion(cp, q.questionId, containerTagFor(q, cp.dataSourceRunId), {
+        question: q.question,
+        groundTruth: q.groundTruth,
+        questionType: q.questionType,
+      })
+    }
+    const { provider, ingested } = countingProvider()
+    const okIngest = provider.ingest
+    let failOnce = true
+    provider.ingest = async (sessions, opts) => {
+      if (failOnce && sessions[0].sessionId === "conv-1-s2") {
+        failOnce = false
+        throw new Error("provider hiccup")
+      }
+      return okIngest(sessions, opts)
+    }
+
+    await runIngestPhase(provider, bench, cp, cm)
+    expect(cp.questions["conv-1-q1"].phases.ingest.status).toBe("failed")
+
+    await runIngestPhase(provider, bench, cp, cm)
+
+    const ph = cp.questions["conv-1-q1"].phases.ingest
+    expect(ph.status).toBe("completed")
+    expect(ph.completedSessions.sort()).toEqual(["conv-1-s1", "conv-1-s2"])
+    expect(ph.ingestResult?.documentIds.sort()).toEqual(["doc-conv-1-s1", "doc-conv-1-s2"])
+    // s1 was ingested once, never again on resume.
+    expect(ingested.filter((x) => x === "conv-1-run/conv-1-s1").length).toBe(1)
+  })
 })
