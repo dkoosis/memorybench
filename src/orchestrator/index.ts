@@ -16,6 +16,7 @@ import { runSearchPhase } from "./phases/search"
 import { runAnswerPhase } from "./phases/answer"
 import { runEvaluatePhase } from "./phases/evaluate"
 import { generateReport, saveReport, printReport } from "./phases/report"
+import { containerTagFor } from "./haystack"
 
 export interface OrchestratorOptions {
   provider: ProviderName
@@ -237,7 +238,7 @@ export class Orchestrator {
         : allQuestions
 
       for (const q of questionsToInit) {
-        const containerTag = `${q.questionId}-${checkpoint.dataSourceRunId}`
+        const containerTag = containerTagFor(q, checkpoint.dataSourceRunId)
         this.checkpointManager.initQuestion(checkpoint, q.questionId, containerTag, {
           question: q.question,
           groundTruth: q.groundTruth,

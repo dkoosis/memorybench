@@ -25,6 +25,11 @@ export interface UnifiedQuestion {
   questionType: string
   groundTruth: string
   haystackSessionIds: string[]
+  /** Questions that share a haystack name it here; the harness then ingests
+   * that haystack once and probes it with every question that names it
+   * (BEAM: 20 questions per conversation). Absent → the question is its own
+   * haystack, as in LongMemEval. */
+  haystackId?: string
   metadata?: Record<string, unknown>
 }
 

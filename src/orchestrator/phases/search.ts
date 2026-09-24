@@ -7,6 +7,7 @@ import { CheckpointManager } from "../checkpoint"
 import { logger } from "../../utils/logger"
 import { ConcurrentExecutor } from "../concurrent"
 import { resolveConcurrency } from "../../types/concurrency"
+import { containerTagFor } from "../haystack"
 
 export async function runSearchPhase(
   provider: Provider,
@@ -46,7 +47,7 @@ export async function runSearchPhase(
     checkpoint.runId,
     "search",
     async ({ item: question, index, total }) => {
-      const containerTag = `${question.questionId}-${checkpoint.dataSourceRunId}`
+      const containerTag = containerTagFor(question, checkpoint.dataSourceRunId)
 
       const startTime = Date.now()
       checkpointManager.updatePhase(checkpoint, question.questionId, "search", {
