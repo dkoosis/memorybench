@@ -21,8 +21,7 @@ const MNEMD_BIN = process.env.MNEMD_BIN || "mnemd"
 
 /** One container is one mnemd nugbase directory. mnemd has no default
  * nugbase at all — every verb refuses without `--nugbase` or `$MNEMD_NUGBASE`
- * (mnemd --help) — which is a stronger guarantee than itzy's (itzy falls back
- * to dk's real vault when its env var is unset). This provider still sets the
+ * (mnemd --help). This provider still sets the
  * env explicitly on every spawn, never relying on that refusal as the only
  * guard. */
 function nugbasePath(containerTag: string): string {
@@ -34,15 +33,15 @@ interface AtomicMemory {
 }
 
 /** Split MEMORY.md-style extraction output ("## Section" headers + "- "
- * bullets) into self-contained atomic memories — the same split the itzy and
- * trixi providers perform, and deliberately so: extraction and granularity
+ * bullets) into self-contained atomic memories — the same split the other
+ * providers perform, and deliberately so: extraction and granularity
  * are held constant across providers so a leaderboard difference is the
  * storage/retrieval engine, not the prompt that fed it.
  *
  * Body carries the session date and nothing else structural — mnemd's own
  * recall is lexical over the stored text (a plain word match, not a ranked
  * embedding), so a repeated section label would be noise in the scored
- * channel exactly as it is for itzy. */
+ * channel. */
 export function splitAtomicMemories(extracted: string, session: UnifiedSession): AtomicMemory[] {
   const date =
     (session.metadata?.formattedDate as string) || (session.metadata?.date as string) || ""
@@ -140,8 +139,8 @@ async function runMnemd(
  * load-bearing: search() without it would answer from whatever was indexed
  * last. Reads still go through the CLI only.
  *
- * ‡ ATOMS ONLY, no session-summary nug — mirrors itzy's choice and for the
- * same reason: mnemd's recall is a lexical word match over stored text
+ * ‡ ATOMS ONLY, no session-summary nug — for the
+ * following reason: mnemd's recall is a lexical word match over stored text
  * (mnemd --help: "find nugs whose text carries those words"), so a
  * whole-session summary would carry many times an atom's matching terms and
  * outrank the atom that actually answers the question.
@@ -149,7 +148,7 @@ async function runMnemd(
  * ‡ EVERY RECALL ARGUMENT CROSSES `--` (mnemd --help: "Flags go before the
  * words; -- ends them, so after -- a word may start with a dash."). A
  * formulated query can start with "-" (e.g. "--seed accepts whole numbers
- * only", the exact case itzy/trixi's comments call out) and mnemd parses
+ * only") and mnemd parses
  * that as an unknown flag without the terminator — confirmed by spawning
  * both ways against a scratch nugbase. Atoms no longer cross argv at all
  * (they are file bodies), which removes the same hazard from the write side.
@@ -157,7 +156,7 @@ async function runMnemd(
 export class MnemdProvider implements Provider {
   name = "mnemd"
   prompts = MNEMD_PROMPTS
-  /** Matched to itzy's and trixi's: shells out to a local binary, so the
+  /** Shells out to a local binary, so the
    * ceiling is this machine's cores and fsync, not a remote rate limit. */
   concurrency = {
     default: 10,
@@ -234,8 +233,7 @@ export class MnemdProvider implements Provider {
   async search(query: string, options: SearchOptions): Promise<unknown[]> {
     if (!this.openai) throw new Error("Provider not initialized")
     const nugbase = nugbasePath(options.containerTag)
-    // Limit 10, matching the harness's retrieval_k and itzy/trixi's tuned
-    // value.
+    // Limit 10, matching the harness's retrieval_k.
     const limit = options.limit || 10
     const formulated = await formulateQuery(this.openai, query)
     const { stdout, exitCode, stderr } = await runMnemd(nugbase, [

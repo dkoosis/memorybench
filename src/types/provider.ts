@@ -53,5 +53,4 @@ export type ProviderName =
   | "zep"
   | "filesystem"
   | "rag"
-  | "trixi"
   | "mnemd"
