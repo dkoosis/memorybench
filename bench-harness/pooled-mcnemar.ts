@@ -9,11 +9,11 @@
  *
  * Example (3 replicate pairs):
  *   bun run pooled-mcnemar.ts \
- *     --ctl trixi123-rep1-ctl,trixi125-rep2-ctl,trixi127-rep3-ctl \
- *     --trt trixi124-rep1-w08,trixi126-rep2-w08,trixi128-rep3-w08
+ *     --ctl ctl-rep1,ctl-rep2,ctl-rep3 \
+ *     --trt trt-rep1,trt-rep2,trt-rep3
  *
  * Single pair (validation):
- *   bun run pooled-mcnemar.ts --ctl trixi120-det-ctl --trt trixi121-det-w08
+ *   bun run pooled-mcnemar.ts --ctl ctl-run --trt trt-run
  *
  * Verdict source: report.json.evaluations[] — each item has questionId, questionType,
  * and score (1=correct, 0=incorrect; identical to label==="correct"). Categories are the

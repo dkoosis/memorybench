@@ -5,7 +5,6 @@ import { Mem0Provider } from "./mem0"
 import { ZepProvider } from "./zep"
 import { FilesystemProvider } from "./filesystem"
 import { RAGProvider } from "./rag"
-import { TrixiProvider } from "./trixi"
 import { MnemdProvider } from "./mnemd"
 
 const providers: Record<ProviderName, new () => Provider> = {
@@ -14,7 +13,6 @@ const providers: Record<ProviderName, new () => Provider> = {
   zep: ZepProvider,
   filesystem: FilesystemProvider,
   rag: RAGProvider,
-  trixi: TrixiProvider,
   mnemd: MnemdProvider,
 }
 
@@ -49,6 +47,5 @@ export {
   ZepProvider,
   FilesystemProvider,
   RAGProvider,
-  TrixiProvider,
   MnemdProvider,
 }

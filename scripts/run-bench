@@ -13,8 +13,8 @@
 # src/utils/models.ts's alias/prefix resolution so the bash judge sniff stays in sync.
 #
 # Usage: scripts/run-bench <memorybench-cli-args...>
-#   scripts/run-bench run -p trixi -b locomo -l 10
-#   scripts/run-bench run -p trixi -b locomo -l 10 -j sonnet-4.5
+#   scripts/run-bench run -p mnemd -b locomo -l 10
+#   scripts/run-bench run -p mnemd -b locomo -l 10 -j sonnet-4.5
 #   scripts/run-bench --check          # resolve + validate preconditions, run nothing
 set -euo pipefail
 
@@ -73,11 +73,8 @@ if [[ "$judge_is_anthropic" == true ]]; then
   esac
 fi
 
-# trixi provider shells out to the trixi binary
-command -v trixi >/dev/null 2>&1 || die "trixi not on PATH (trixi provider requires it)"
-
 if [[ "${1:-}" == "--check" ]]; then
-  echo "run-bench: OK — OPENAI_API_KEY resolved (${#OPENAI_API_KEY} chars, ${OPENAI_API_KEY:0:7}…)$([[ "$judge_is_anthropic" == true ]] && echo ", ANTHROPIC_API_KEY resolved (${#ANTHROPIC_API_KEY} chars)"), trixi=$(command -v trixi)"
+  echo "run-bench: OK — OPENAI_API_KEY resolved (${#OPENAI_API_KEY} chars, ${OPENAI_API_KEY:0:7}…)$([[ "$judge_is_anthropic" == true ]] && echo ", ANTHROPIC_API_KEY resolved (${#ANTHROPIC_API_KEY} chars)")"
   exit 0
 fi
 
